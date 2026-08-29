@@ -1,0 +1,29 @@
+[Unit]
+Description=BlueRelief native Gio UI
+After=bluerelief-web.service bluerelief-kiosk.service
+Requires=bluerelief-web.service bluerelief-kiosk.service
+# Belt to ExecCondition's braces: if the compositor comes up but the output
+# vanishes later, give up after 5 failures in 2 minutes instead of looping
+# until the journal fills. StartLimit* are [Unit] keys — systemd silently
+# ignores them under [Service].
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ding
+PAMName=login
+# PANEL=off skips this unit. Without it, a panel the kernel can't see makes
+# bluerelief-gio exit with "wayland: no outputs available" on a 2-second loop.
+ExecCondition=/usr/local/bin/bluerelief-config check PANEL
+Environment=XDG_RUNTIME_DIR=/run/user/1001
+Environment=WAYLAND_DISPLAY=wayland-1
+ExecStartPre=/bin/sh -c 'until test -S /run/user/1001/wayland-1; do sleep 0.2; done'
+ExecStart=/usr/local/bin/bluerelief-gio --base-url http://127.0.0.1:8085
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+[Unit]
+Description=BlueRelief watchdog (detects wedged librespot and restarts raspotify)
+Documentation=https://github.com/librespot-org/librespot
+After=raspotify.service
+
+[Service]
+Type=oneshot
+ExecCondition=/usr/local/bin/bluerelief-config check WATCHDOG
+ExecStart=/usr/local/bin/bluerelief-watchdog

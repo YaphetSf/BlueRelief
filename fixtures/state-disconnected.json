@@ -1,0 +1,44 @@
+{
+  "client": {
+    "brand_name": null,
+    "id": null,
+    "model_name": null,
+    "name": null
+  },
+  "last_event": {
+    "fields": {
+      "player_event": "session_disconnected"
+    },
+    "name": "session_disconnected",
+    "received_at": "2026-05-14T22:05:38.878Z"
+  },
+  "playback": {
+    "is_playing": false,
+    "position_ms": null,
+    "position_updated_at": null,
+    "status": "disconnected",
+    "track_id": null
+  },
+  "schema_version": 1,
+  "session": {
+    "connected": false,
+    "connected_at": null,
+    "connection_id": null,
+    "disconnected_at": "2026-05-14T22:05:38.878Z",
+    "user_name": null
+  },
+  "settings": {
+    "auto_play": null,
+    "filter_explicit_content": null,
+    "repeat": null,
+    "shuffle": null,
+    "volume_percent": null,
+    "volume_raw": null
+  },
+  "sink": {
+    "status": null,
+    "updated_at": null
+  },
+  "track": null,
+  "updated_at": "2026-05-14T22:05:38.878Z"
+}

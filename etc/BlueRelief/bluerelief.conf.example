@@ -1,0 +1,99 @@
+# BlueRelief runtime configuration — the single place every feature is
+# switched on and off. Installed as /etc/BlueRelief/bluerelief.conf (root:root
+# 0644). Nothing else on the board holds feature state: if it isn't in here,
+# it isn't a switch.
+#
+# ┌───────────────────────────────────────────────────────────────────────┐
+# │ THIS IS THE TEMPLATE, NOT THE BOARD'S STATE.                          │
+# │ The values below are first-install defaults. The board's real values  │
+# │ live only on the board and are deliberately never overwritten by a    │
+# │ deploy, so do not read PANEL=on here and conclude the screen is on.   │
+# │                                                                       │
+# │     ssh BlueRelief bluerelief-config     ← the actual state           │
+# └───────────────────────────────────────────────────────────────────────┘
+#
+# Read two ways by systemd, from this one file:
+#   - ExecCondition=/usr/local/bin/bluerelief-config check <KEY>  gates the
+#     on/off switches, so a unit whose switch is off is cleanly *skipped* at
+#     boot rather than started and left to crash-loop.
+#   - EnvironmentFile= hands the tuning keys to bluerelief-web and
+#     bluerelief-screen, which read them straight out of their environment.
+#
+# Change it with `bluerelief-config`, which validates the value and reconciles
+# the running units in one step:
+#
+#   bluerelief-config                 # show every switch and what it controls
+#   bluerelief-config PANEL off       # set + apply
+#   bluerelief-config apply           # re-apply after hand-editing this file
+#
+# Syntax is systemd EnvironmentFile syntax: KEY=VALUE, one per line, `#`
+# comments, no shell expansion, no `export`.
+#
+# Fail-open by design: a missing file, a missing key, or an unparseable value
+# reads as "on". A broken config must never silence the music.
+
+# ── Sources ───────────────────────────────────────────────────────────────
+# SPOTIFY=on|off — Spotify Connect via raspotify/librespot.
+#   Gates: raspotify.service
+#   off also stops new events reaching state.json; the last state stays visible.
+SPOTIFY=on
+
+# AIRPLAY=on|off — AirPlay receiver ("BlueRelief AirPlay") via shairport-sync.
+#   Gates: shairport-sync.service, bluerelief-airplay-bridge.service
+AIRPLAY=on
+
+# ── Display ───────────────────────────────────────────────────────────────
+# PANEL=on|off — the 1920x1080 DisplayPort touch panel and everything drawn on
+# it: the sway compositor, the native Gio UI, and the blanking daemon. One
+# switch for all three because they are a single chain — the UI needs the
+# compositor, the blanking daemon needs the compositor's IPC.
+#
+#   Gates: bluerelief-kiosk.service, bluerelief-gio.service,
+#          bluerelief-screen.service
+#
+#   Set off when the panel is unplugged or you just don't want a screen. Audio
+#   and the web UI on :8085 keep working untouched — reach it from the Mac with
+#   `ssh -L 8085:127.0.0.1:8085 BlueRelief`.
+#
+#   Note the name: not DISPLAY. This file is an EnvironmentFile, and a stray
+#   DISPLAY in the environment sends wlroots hunting for an X11 server.
+PANEL=on
+
+# SCREEN_IDLE=<duration>|off — how long the panel stays lit after playback
+# stops before DPMS-off. Go duration syntax (30s, 5m, 1h). `off` = never blank.
+#   Read by: bluerelief-screen
+#   Ignored when PANEL=off.
+SCREEN_IDLE=5m
+
+# ── Control links ─────────────────────────────────────────────────────────
+# SPOTIFY_CLIENT_ID — Spotify app Client ID (PKCE, no secret). Empty leaves the
+# UI read-only: now-playing still renders, transport buttons and Browse are
+# disabled. Register at https://developer.spotify.com/dashboard with redirect
+# URI http://127.0.0.1:8888/callback (used by bluerelief-auth on the Mac).
+#   Read by: bluerelief-web
+#   Also needs /var/lib/BlueRelief/spotify-token.json — see README.
+SPOTIFY_CLIENT_ID=
+
+# SPOTIFY_DEVICE_NAME — librespot device name to target. Must match
+# LIBRESPOT_NAME in /etc/raspotify/conf. The control link looks this device up
+# in /me/player/devices when no playback session is active.
+#   Read by: bluerelief-web
+SPOTIFY_DEVICE_NAME=BlueRelief
+
+# AIRPLAY_CONTROL=mpris|playerctl|none — how transport controls reach
+# shairport-sync. `none` keeps now-playing visible but disables the AirPlay
+# transport buttons; use it if this shairport-sync build lacks MPRIS/DBus.
+#   Read by: bluerelief-web
+AIRPLAY_CONTROL=mpris
+
+# LYRICS=on|off — synced lyrics from LRCLIB. off skips the lookup entirely and
+# the UI stays in the single-column album layout.
+#   Read by: bluerelief-web
+LYRICS=on
+
+# ── Reliability ───────────────────────────────────────────────────────────
+# WATCHDOG=on|off — the 2-minute probe that restarts raspotify when librespot
+# goes "alive but wedged". See bin/bluerelief-watchdog for the two failure
+# modes it detects.
+#   Gates: bluerelief-watchdog.timer
+WATCHDOG=on

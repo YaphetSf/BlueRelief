@@ -1,0 +1,98 @@
+#!/bin/sh
+# bluerelief-watchdog — detects two distinct "looks alive but isn't playing"
+# failure modes in librespot and restarts raspotify.
+#
+# Failure mode A — local event loop wedged.
+#   librespot's process is alive but its event loop has stopped servicing
+#   requests (often after a burst of Symphonia decode errors). systemd's
+#   Restart= can't see this because the process is technically running.
+#   Symptom: Spotify shows "BlueRelief" in the device list but clicking it spins
+#   forever; the DAC is held; nothing plays.
+#   Probe: ZeroConf HTTP endpoint `?action=getInfo`. Returns 200 + JSON when
+#   the local event loop is healthy, times out when wedged.
+#
+# Failure mode B — dealer websocket wedged.
+#   The connection to Spotify's *cloud* dealer (the long-lived WebSocket that
+#   carries playback context, queue, "next track" signals) has died but
+#   librespot's local event loop is still happy. ZeroConf still answers 200
+#   — they're independent sockets. User-facing symptom: a track plays to its
+#   natural end, then nothing happens, OR playback stops mid-song with
+#   "Spotify can't play this right now" on the phone.
+#   Probe: scan raspotify's journal for the dealer-down fingerprint
+#   ("channel closed" / "Websocket peer does not respond") in the last 3
+#   minutes; ≥3 hits = sustained, not a transient blip.
+#
+# Behavior:
+#   - Mode B is in-band: 3 errors in 3 minutes IS the confirmation, restart
+#     immediately on the first watchdog tick that observes it.
+#   - Mode A uses a two-miss confirmation (legacy behavior) — single missed
+#     ZeroConf probes are sometimes transient (DNS hiccup, etc.).
+#   - 5-minute cooldown after any restart so the new librespot has time to
+#     come up before its absence trips the probe again.
+#
+# Driven by bluerelief-watchdog.timer every 2 minutes.
+
+set -u
+
+LOG() {
+    logger -t bluerelief-watchdog "$*"
+    echo "$(date -u +%FT%TZ) $*"
+}
+
+restart_raspotify() {
+    reason=$1
+    rm -f "$MISS"
+    if systemctl restart raspotify; then
+        touch "$RESTARTED"
+        LOG "raspotify restart issued ($reason)"
+    else
+        LOG "ERROR: systemctl restart raspotify failed ($reason)"
+    fi
+}
+
+MISS=/run/bluerelief-watchdog.miss
+RESTARTED=/run/bluerelief-watchdog.last-restart
+
+# Cooldown: skip checks while raspotify is still coming up after our restart.
+if [ -f "$RESTARTED" ]; then
+    age=$(( $(date +%s) - $(stat -c %Y "$RESTARTED") ))
+    if [ "$age" -lt 300 ]; then
+        exit 0
+    fi
+    rm -f "$RESTARTED"
+fi
+
+# ── Probe B: dealer websocket health ────────────────────────────────────
+# Count dealer-down signals in the last 3 minutes. The window matches the
+# timer cadence × 1.5 so two adjacent timer firings see overlapping data
+# and a real wedge doesn't slip between probes.
+dealer_errs=$(journalctl -u raspotify --since "3 minutes ago" --no-pager -q 2>/dev/null \
+              | grep -cE "(channel closed|Websocket peer does not respond)")
+if [ "${dealer_errs:-0}" -ge 3 ]; then
+    LOG "WEDGE-B confirmed: ${dealer_errs} dealer/websocket errors in last 3m"
+    restart_raspotify "dealer wedge"
+    exit 0
+fi
+
+# ── Probe A: local event loop via ZeroConf ──────────────────────────────
+# Discover librespot's ZeroConf listening port (chosen randomly per startup).
+port=$(ss -tlnp 2>/dev/null | awk '/users:\(\("librespot"/ {
+    n = split($4, a, ":"); print a[n]; exit
+}')
+
+if [ -n "$port" ] && curl --max-time 4 -fsS -o /dev/null \
+       "http://127.0.0.1:${port}/?action=getInfo"; then
+    [ -f "$MISS" ] && LOG "recovered (port :${port})"
+    rm -f "$MISS"
+    exit 0
+fi
+
+# Miss. Two consecutive misses required before acting.
+if [ ! -f "$MISS" ]; then
+    LOG "miss 1/2 (port='${port:-none}'); will recheck in 2m"
+    touch "$MISS"
+    exit 0
+fi
+
+LOG "WEDGE-A confirmed: ZeroConf unresponsive (port='${port:-none}')"
+restart_raspotify "zeroconf wedge"

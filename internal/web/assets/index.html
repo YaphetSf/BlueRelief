@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>BlueRelief</title>
+  <link rel="stylesheet" href="/assets/app.css" />
+</head>
+<body data-state="disconnected">
+  <div class="ambient" id="ambient" aria-hidden="true"></div>
+  <main id="app">
+    <section class="cover-pane">
+      <div class="cover-frame" id="cover">
+        <div class="cover-placeholder">BlueRelief</div>
+      </div>
+    </section>
+    <section class="track-meta">
+      <header class="status-row">
+        <span class="status-dot"></span>
+        <span class="status-text" id="status">Disconnected</span>
+        <span class="auth-warn" id="auth-warn" hidden>Run bluerelief-auth</span>
+      </header>
+      <h1 class="track-title" id="title">—</h1>
+      <p class="track-sub">
+        <span id="artist">—</span>
+        <span class="track-sub-sep">·</span>
+        <span id="album">—</span>
+      </p>
+      <div class="progress">
+        <div class="progress-bar" id="progress-bar" role="slider" tabindex="0" aria-label="seek">
+          <div class="progress-fill" id="progress-fill"></div>
+        </div>
+        <div class="progress-times">
+          <span id="position">0:00</span>
+          <span id="duration">0:00</span>
+        </div>
+      </div>
+    </section>
+    <section class="lyrics-pane" id="lyrics-pane" hidden>
+      <ol class="lyrics-lines" id="lyrics-lines"></ol>
+    </section>
+    <nav class="controls" id="controls" aria-label="playback controls">
+      <button class="ctl ctl-prev"   id="btn-prev"    aria-label="previous">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="2" height="12"/><path d="M9.5 12L18 6v12z"/></svg>
+      </button>
+      <button class="ctl ctl-play"   id="btn-play"    aria-label="play/pause">
+        <svg class="icon icon-play"  viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+        <svg class="icon icon-pause" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>
+      </button>
+      <button class="ctl ctl-next"   id="btn-next"    aria-label="next">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6v12l8.5-6z"/><rect x="16" y="6" width="2" height="12"/></svg>
+      </button>
+      <button class="ctl ctl-vd"     id="btn-vol-dn"  aria-label="volume down">−</button>
+      <span   class="ctl-readout"    id="vol-readout">—</span>
+      <button class="ctl ctl-vu"     id="btn-vol-up"  aria-label="volume up">+</button>
+    </nav>
+  </main>
+
+  <script src="/assets/app.js"></script>
+</body>
+</html>

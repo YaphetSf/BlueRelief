@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-05-14T22:05:14.370Z",
+  "last_event": {
+    "name": "airplay:core.minm",
+    "received_at": "2026-05-14T22:05:14.370Z",
+    "fields": {
+      "type": "core",
+      "code": "minm",
+      "length": "15",
+      "text": "Digital Witness"
+    }
+  },
+  "source": {
+    "kind": "airplay",
+    "name": "AirPlay",
+    "active": true,
+    "updated_at": "2026-05-14T22:05:14.370Z"
+  },
+  "capabilities": {
+    "transport": true,
+    "volume": true,
+    "seek": false,
+    "browse": false,
+    "queue": false
+  },
+  "session": {
+    "connected": true,
+    "connected_at": "2026-05-14T22:00:00.000Z",
+    "disconnected_at": null,
+    "connection_id": null,
+    "user_name": "iPhone"
+  },
+  "playback": {
+    "status": "playing",
+    "is_playing": true,
+    "track_id": "airplay:demo",
+    "position_ms": 42000,
+    "position_updated_at": "2026-05-14T22:05:14.370Z"
+  },
+  "track": {
+    "item_type": "track",
+    "id": "airplay:demo",
+    "name": "Digital Witness",
+    "duration_ms": 241000,
+    "covers": [
+      "/api/artwork/airplay?rev=demo"
+    ],
+    "album": "St. Vincent",
+    "artists": ["St. Vincent"]
+  },
+  "settings": {
+    "volume_percent": 67,
+    "volume_raw": null,
+    "shuffle": null,
+    "repeat": null,
+    "auto_play": null,
+    "filter_explicit_content": null
+  },
+  "sink": {
+    "status": null,
+    "updated_at": null
+  },
+  "client": {
+    "brand_name": null,
+    "id": null,
+    "model_name": null,
+    "name": null
+  }
+}

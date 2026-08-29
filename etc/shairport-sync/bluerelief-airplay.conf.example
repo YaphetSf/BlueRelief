@@ -1,0 +1,36 @@
+// BlueRelief AirPlay baseline for /etc/shairport-sync.conf.
+//
+// Keep raspotify installed and running. This only adds an AirPlay receiver
+// named "BlueRelief AirPlay" that uses the same ALSA/USB DAC path as Raspotify.
+// On this ROCK, the working USB DAC is card id AUDIO:
+//   card 3: AUDIO [USB HIFI AUDIO], device 0: USB Audio
+// Use the card id rather than card number so USB enumeration changes do not
+// move AirPlay to the wrong output.
+
+general =
+{
+  name = "BlueRelief AirPlay";
+  output_backend = "alsa";
+  mdns_backend = "avahi";
+  interpolation = "soxr";
+  mpris_service_bus = "system";
+};
+
+metadata =
+{
+  enabled = "yes";
+  include_cover_art = "yes";
+  pipe_name = "/run/BlueRelief/airplay-metadata";
+  pipe_timeout = 5000;
+};
+
+sessioncontrol =
+{
+  allow_session_interruption = "yes";
+  session_timeout = 20;
+};
+
+alsa =
+{
+  output_device = "plughw:AUDIO,0";
+};

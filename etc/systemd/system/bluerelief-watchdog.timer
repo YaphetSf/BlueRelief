@@ -1,0 +1,12 @@
+[Unit]
+Description=Run bluerelief-watchdog every 2 minutes
+Documentation=man:bluerelief-watchdog(8)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=15s
+Unit=bluerelief-watchdog.service
+
+[Install]
+WantedBy=timers.target

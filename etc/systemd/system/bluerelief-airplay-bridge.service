@@ -1,0 +1,18 @@
+[Unit]
+Description=BlueRelief AirPlay metadata bridge (shairport-sync -> state.json)
+After=shairport-sync.service
+Wants=shairport-sync.service
+
+[Service]
+Type=simple
+User=root
+ExecCondition=/usr/local/bin/bluerelief-config check AIRPLAY
+ExecStart=/usr/local/bin/airplay-event \
+  --metadata-pipe /run/BlueRelief/airplay-metadata \
+  --artwork-file /run/BlueRelief/airplay-artwork \
+  --artwork-url /api/artwork/airplay
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

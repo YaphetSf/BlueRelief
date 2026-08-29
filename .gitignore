@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+
+.DS_Store
+
+/.cache/
+/bluerelief-tui
+/bluerelief-web
+/bluerelief-gio
+/bluerelief-screen
+/dist/
+*.test
+
+# OAuth refresh token — never commit
+/spotify-token.json
+
+# Agent/editor local config — kept on disk, not tracked
+/.claude/
+/CLAUDE.md

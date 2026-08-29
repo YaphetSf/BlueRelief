@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-05-14T22:05:14.370Z",
+  "last_event": {
+    "name": "playing",
+    "received_at": "2026-05-14T22:05:14.370Z",
+    "fields": {
+      "player_event": "playing",
+      "position_ms": "0",
+      "track_id": "10Nmj3JCNoMeBQ87uw5j8k"
+    }
+  },
+  "session": {
+    "connected": true,
+    "connected_at": "2026-05-14T22:00:00.000Z",
+    "disconnected_at": null,
+    "connection_id": "demo-session",
+    "user_name": "demo"
+  },
+  "playback": {
+    "status": "playing",
+    "is_playing": true,
+    "track_id": "10Nmj3JCNoMeBQ87uw5j8k",
+    "position_ms": 0,
+    "position_updated_at": "2026-05-14T22:05:14.370Z"
+  },
+  "track": {
+    "item_type": "track",
+    "id": "10Nmj3JCNoMeBQ87uw5j8k",
+    "uri": "spotify:track:10Nmj3JCNoMeBQ87uw5j8k",
+    "name": "Dani California",
+    "duration_ms": 282160,
+    "covers": [
+      "https://i.scdn.co/image/ab67616d0000b273de1af2785a83cc660155a0c4"
+    ],
+    "album": "Stadium Arcadium",
+    "artists": ["Red Hot Chili Peppers"],
+    "album_artists": ["Red Hot Chili Peppers"]
+  },
+  "settings": {
+    "volume_percent": 70,
+    "volume_raw": 45875,
+    "shuffle": false,
+    "repeat": "off",
+    "auto_play": null,
+    "filter_explicit_content": null
+  },
+  "sink": {
+    "status": "running",
+    "updated_at": "2026-05-14T22:05:14.370Z"
+  },
+  "client": {
+    "brand_name": null,
+    "id": null,
+    "model_name": null,
+    "name": null
+  },
+  "lyrics": {
+    "source": "demo",
+    "synced": true,
+    "lines": [
+      { "time_ms": 0,      "text": "♪" },
+      { "time_ms": 18000,  "text": "Getting born in the state of Mississippi" },
+      { "time_ms": 22000,  "text": "Papa was a copper and her mama was a hippie" },
+      { "time_ms": 26000,  "text": "In Alabama she would swing a hammer" },
+      { "time_ms": 30000,  "text": "Price you got to pay when you break the panorama" },
+      { "time_ms": 34000,  "text": "She never knew that there was anything more than poor" },
+      { "time_ms": 38000,  "text": "What in the world does your company take me for?" },
+      { "time_ms": 46000,  "text": "Black bandana, sweet Louisiana" },
+      { "time_ms": 50000,  "text": "Robbin' on a bank in the state of Indiana" },
+      { "time_ms": 54000,  "text": "She's a runner, rebel and a stunner" },
+      { "time_ms": 58000,  "text": "On her merry way sayin', \"Baby, whatcha gonna?\"" },
+      { "time_ms": 62000,  "text": "Lookin' down the barrel of a hot metal forty-five" },
+      { "time_ms": 66000,  "text": "Just another way to survive" },
+      { "time_ms": 74000,  "text": "California, rest in peace" },
+      { "time_ms": 78000,  "text": "Simultaneous release" },
+      { "time_ms": 82000,  "text": "California, show your teeth" },
+      { "time_ms": 86000,  "text": "She's my priestess, I'm your priest" },
+      { "time_ms": 90000,  "text": "Yeah, yeah" },
+      { "time_ms": 102000, "text": "She's a lover, baby, and a fighter" },
+      { "time_ms": 106000, "text": "Shoulda seen her comin' when it got a little brighter" },
+      { "time_ms": 110000, "text": "With a name like Dani California" },
+      { "time_ms": 114000, "text": "Day was gonna come when I was gonna mourn ya" },
+      { "time_ms": 118000, "text": "A little loaded, she was stealin' another breath" },
+      { "time_ms": 122000, "text": "I love my baby to death" }
+    ]
+  }
+}

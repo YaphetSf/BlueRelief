@@ -1,0 +1,708 @@
+#!/usr/bin/env python3
+"""shairport-sync metadata bridge for the BlueRelief status display."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import fcntl
+import hashlib
+import json
+import os
+import re
+import select
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+DEFAULT_STATE_DIR = "/run/BlueRelief"
+DEFAULT_STATE_FILE = "state.json"
+DEFAULT_METADATA_PIPE = "/run/BlueRelief/airplay-metadata"
+DEFAULT_ARTWORK_FILE = "/run/BlueRelief/airplay-artwork"
+DEFAULT_ARTWORK_URL = "/api/artwork/airplay"
+DEFAULT_CONTROL_BASE_URL = "http://127.0.0.1:8085"
+AIRPLAY_SAMPLE_RATE = 44_100
+
+TYPE_RE = re.compile(r"<type>([0-9a-fA-F]{8})</type>")
+CODE_RE = re.compile(r"<code>([0-9a-fA-F]{8})</code>")
+DATA_RE = re.compile(r"<data(?:\s+[^>]*)?>(.*?)</data>", re.DOTALL)
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def state_path() -> Path:
+    explicit = os.environ.get("BLUERELIEF_STATE_FILE")
+    if explicit:
+        return Path(explicit)
+    return Path(os.environ.get("BLUERELIEF_STATE_DIR", DEFAULT_STATE_DIR)) / DEFAULT_STATE_FILE
+
+
+def state_lock_path(path: Path) -> Path:
+    explicit = os.environ.get("BLUERELIEF_STATE_LOCK")
+    if explicit:
+        return Path(explicit)
+    return path.with_name(f"{path.name}.lock")
+
+
+def open_state_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = state_lock_path(path).open("a+", encoding="utf-8")
+    try:
+        os.chmod(handle.name, 0o666)
+    except OSError:
+        pass
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    return handle
+
+
+def default_state() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "updated_at": None,
+        "last_event": None,
+        "source": {
+            "kind": "idle",
+            "name": "Idle",
+            "active": False,
+            "updated_at": None,
+        },
+        "capabilities": idle_capabilities(),
+        "session": {
+            "connected": False,
+            "user_name": None,
+            "connection_id": None,
+            "connected_at": None,
+            "disconnected_at": None,
+        },
+        "client": {
+            "id": None,
+            "name": None,
+            "brand_name": None,
+            "model_name": None,
+        },
+        "playback": {
+            "status": "disconnected",
+            "is_playing": False,
+            "track_id": None,
+            "position_ms": None,
+            "position_updated_at": None,
+        },
+        "track": None,
+        "settings": {
+            "volume_raw": None,
+            "volume_percent": None,
+            "shuffle": None,
+            "repeat": None,
+            "auto_play": None,
+            "filter_explicit_content": None,
+        },
+        "sink": {
+            "status": None,
+            "updated_at": None,
+        },
+    }
+
+
+def airplay_capabilities() -> dict[str, bool]:
+    return {
+        "transport": True,
+        "volume": True,
+        "seek": False,
+        "browse": False,
+        "queue": False,
+    }
+
+
+def idle_capabilities() -> dict[str, bool]:
+    return {
+        "transport": False,
+        "volume": False,
+        "seek": False,
+        "browse": False,
+        "queue": False,
+    }
+
+
+def read_state(path: Path) -> dict[str, Any]:
+    state = default_state()
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return state
+    except json.JSONDecodeError as error:
+        state["last_error"] = f"could not parse previous state: {error}"
+        return state
+
+    if isinstance(existing, dict):
+        deep_update(state, existing)
+    return state
+
+
+def deep_update(target: dict[str, Any], source: dict[str, Any]) -> None:
+    for key, value in source.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            deep_update(target[key], value)
+        else:
+            target[key] = value
+
+
+def write_state(path: Path, state: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+        text=True,
+    )
+    tmp_path = Path(tmp_name)
+
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        tmp_path.chmod(0o644)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def write_bytes_atomic(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        tmp_path.chmod(0o644)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def fourcc(hex_text: str) -> str:
+    try:
+        return bytes.fromhex(hex_text).decode("latin-1")
+    except ValueError:
+        return hex_text
+
+
+def decode_text(data: bytes) -> str | None:
+    if not data:
+        return None
+    for encoding in ("utf-8", "latin-1"):
+        try:
+            return data.decode(encoding).strip("\x00\r\n ")
+        except UnicodeDecodeError:
+            pass
+    return None
+
+
+def decode_duration_ms(data: bytes) -> int | None:
+    if len(data) >= 4:
+        value = int.from_bytes(data[:4], "big", signed=False)
+        if 0 < value < 24 * 60 * 60 * 1000:
+            return value
+    text = decode_text(data)
+    if not text:
+        return None
+    match = re.search(r"\d+", text)
+    if not match:
+        return None
+    value = int(match.group(0))
+    if 0 < value < 24 * 60 * 60 * 1000:
+        return value
+    return None
+
+
+def decode_progress(data: bytes) -> tuple[int | None, int | None]:
+    values: list[int] = []
+    if len(data) >= 12:
+        values = [int.from_bytes(data[i : i + 4], "big", signed=False) for i in (0, 4, 8)]
+    else:
+        text = decode_text(data) or ""
+        values = [int(part) for part in re.findall(r"\d+", text)[:3]]
+    if len(values) != 3:
+        return None, None
+
+    start, current, end = values
+    if current < start:
+        return None, None
+
+    position_ms = round((current - start) * 1000 / AIRPLAY_SAMPLE_RATE)
+    duration_ms = None
+    if end > start:
+        duration_ms = round((end - start) * 1000 / AIRPLAY_SAMPLE_RATE)
+    return position_ms, duration_ms
+
+
+def sane_progress_position(position_ms: int | None, duration_ms: Any) -> bool:
+    if position_ms is None or position_ms < 0:
+        return False
+    if not isinstance(duration_ms, int) or duration_ms <= 0:
+        return False
+    return position_ms <= duration_ms + 30_000
+
+def decode_volume_percent(data: bytes) -> int | None:
+    text = decode_text(data)
+    if not text:
+        return None
+    try:
+        db = float(text.split(",", 1)[0])
+    except ValueError:
+        return None
+    if db <= -144:
+        return 0
+    return clamp(round((db + 30.0) / 30.0 * 100), 0, 100)
+
+
+def parse_item(raw: str) -> dict[str, Any] | None:
+    type_match = TYPE_RE.search(raw)
+    code_match = CODE_RE.search(raw)
+    if type_match is None or code_match is None:
+        return None
+
+    data = b""
+    data_match = DATA_RE.search(raw)
+    if data_match is not None:
+        compact = "".join(data_match.group(1).split())
+        if compact:
+            try:
+                data = base64.b64decode(compact, validate=False)
+            except ValueError:
+                data = compact.encode("utf-8", errors="replace")
+
+    type_hex = type_match.group(1).lower()
+    code_hex = code_match.group(1).lower()
+    return {
+        "type": fourcc(type_hex),
+        "code": fourcc(code_hex),
+        "type_hex": type_hex,
+        "code_hex": code_hex,
+        "data": data,
+    }
+
+
+class ItemAssembler:
+    def __init__(self) -> None:
+        self.in_item = False
+        self.parts: list[str] = []
+
+    def feed(self, line: str) -> list[str]:
+        out: list[str] = []
+        while line:
+            if not self.in_item:
+                start = line.find("<item>")
+                if start < 0:
+                    break
+                self.in_item = True
+                self.parts = []
+                line = line[start:]
+
+            end = line.find("</item>")
+            if end >= 0:
+                self.parts.append(line[: end + len("</item>")])
+                out.append("".join(self.parts))
+                self.in_item = False
+                self.parts = []
+                line = line[end + len("</item>") :]
+                continue
+
+            self.parts.append(line)
+            break
+        return out
+
+
+def remove_empty(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: remove_empty(item)
+            for key, item in value.items()
+            if item is not None and item != []
+        }
+    return value
+
+
+def clamp(value: int, min_value: int, max_value: int) -> int:
+    return max(min_value, min(max_value, value))
+
+
+def set_airplay_source(state: dict[str, Any], timestamp: str, active: bool = True) -> None:
+    state["source"] = {
+        "kind": "airplay",
+        "name": "AirPlay",
+        "active": active,
+        "updated_at": timestamp,
+    }
+    state["capabilities"] = airplay_capabilities() if active else idle_capabilities()
+
+
+def set_idle_source(state: dict[str, Any], timestamp: str) -> None:
+    state["source"] = {
+        "kind": "idle",
+        "name": "Idle",
+        "active": False,
+        "updated_at": timestamp,
+    }
+    state["capabilities"] = idle_capabilities()
+
+
+def active_source_kind(state: dict[str, Any]) -> str | None:
+    source = state.get("source")
+    if isinstance(source, dict):
+        kind = str(source.get("kind") or "").strip().lower()
+        if kind and kind != "idle" and source.get("active", True):
+            return kind
+
+    playback = state.get("playback")
+    if isinstance(playback, dict) and playback.get("is_playing"):
+        return "spotify"
+    return None
+
+
+def airplay_claims_source(item: dict[str, Any]) -> bool:
+    return item["type"] == "ssnc" and item["code"] in {"pbeg", "abeg", "prsm", "pres"}
+
+
+def should_accept_airplay_item(state: dict[str, Any], item: dict[str, Any]) -> bool:
+    current = active_source_kind(state)
+    return airplay_claims_source(item) or current in {None, "airplay"}
+
+
+def pause_source(source: str) -> None:
+    if source not in {"airplay", "spotify"}:
+        return
+    base_url = os.environ.get("BLUERELIEF_CONTROL_BASE_URL", DEFAULT_CONTROL_BASE_URL).rstrip("/")
+    url = f"{base_url}/api/control/pause?source={source}"
+    req = urllib.request.Request(url, method="POST")
+    try:
+        urllib.request.urlopen(req, timeout=1.5).close()
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError):
+        pass
+
+
+def reset_playback_for_source_switch(state: dict[str, Any]) -> None:
+    state["track"] = None
+    state["playback"].update(
+        {
+            "track_id": None,
+            "position_ms": None,
+            "position_updated_at": None,
+        }
+    )
+
+
+def mark_connected(state: dict[str, Any], timestamp: str) -> None:
+    session = state["session"]
+    if not session.get("connected"):
+        session["connected_at"] = timestamp
+    session["connected"] = True
+    session["disconnected_at"] = None
+    playback = state["playback"]
+    if playback.get("status") in {"", None, "disconnected"}:
+        playback["status"] = "connected"
+
+
+def mark_disconnected(state: dict[str, Any], timestamp: str, status: str) -> None:
+    state["session"].update(
+        {
+            "connected": False,
+            "disconnected_at": timestamp,
+        }
+    )
+    state["playback"].update(
+        {
+            "status": status,
+            "is_playing": False,
+        }
+    )
+    set_airplay_source(state, timestamp, active=False)
+
+
+def track_key(track: dict[str, Any]) -> str:
+    artists = ",".join(track.get("artists") or [])
+    basis = "|".join(
+        str(part or "")
+        for part in (
+            track.get("name"),
+            artists,
+            track.get("album"),
+            track.get("duration_ms"),
+        )
+    )
+    if not basis.strip("|"):
+        return ""
+    digest = hashlib.sha1(basis.encode("utf-8")).hexdigest()[:16]
+    return f"airplay:{digest}"
+
+
+def update_track(state: dict[str, Any], **fields: Any) -> None:
+    track = dict(state.get("track") or {})
+    for key, value in fields.items():
+        if value is not None and value != []:
+            track[key] = value
+    track["item_type"] = "track"
+    track_id = track_key(track)
+    if track_id:
+        track["id"] = track_id
+        state["playback"]["track_id"] = track_id
+    state["track"] = remove_empty(track)
+
+
+def artwork_url(base_url: str, data: bytes) -> str:
+    sep = "&" if "?" in base_url else "?"
+    rev = hashlib.sha1(data).hexdigest()[:12]
+    return f"{base_url}{sep}rev={rev}"
+
+
+def item_fields(item: dict[str, Any]) -> dict[str, str]:
+    fields = {
+        "type": item["type"],
+        "code": item["code"],
+        "length": str(len(item["data"])),
+    }
+    if len(item["data"]) <= 256:
+        text = decode_text(item["data"])
+        if text:
+            fields["text"] = text
+    return fields
+
+
+def apply_item(
+    state: dict[str, Any],
+    item: dict[str, Any],
+    timestamp: str,
+    artwork_path: Path,
+    artwork_base_url: str,
+) -> tuple[bool, str | None] | None:
+    if not should_accept_airplay_item(state, item):
+        return None
+
+    previous_source = active_source_kind(state)
+    pause_after_write = (
+        previous_source
+        if airplay_claims_source(item) and previous_source not in {None, "airplay"}
+        else None
+    )
+    code = item["code"]
+    data = item["data"]
+    idle_pending = False
+
+    if pause_after_write is not None:
+        reset_playback_for_source_switch(state)
+    if airplay_claims_source(item) or previous_source in {None, "airplay"}:
+        set_airplay_source(state, timestamp)
+    mark_connected(state, timestamp)
+
+    if item["type"] == "core":
+        if code == "minm":
+            update_track(state, name=decode_text(data))
+        elif code == "asar":
+            artist = decode_text(data)
+            update_track(state, artists=[artist] if artist else None)
+        elif code == "asal":
+            update_track(state, album=decode_text(data))
+        elif code == "astm":
+            update_track(state, duration_ms=decode_duration_ms(data))
+
+    elif item["type"] == "ssnc":
+        if code in {"pbeg", "abeg", "prsm", "pres"}:
+            state["playback"].update({"status": "playing", "is_playing": True})
+            if state["playback"].get("position_ms") is not None:
+                state["playback"]["position_updated_at"] = timestamp
+        elif code in {"paus", "pfls"}:
+            state["playback"].update({"status": "paused", "is_playing": False})
+            if state["playback"].get("position_ms") is not None:
+                state["playback"]["position_updated_at"] = timestamp
+        elif code in {"pend", "aend"}:
+            mark_disconnected(state, timestamp, "stopped")
+            idle_pending = True
+        elif code == "disc":
+            mark_disconnected(state, timestamp, "disconnected")
+            state["track"] = None
+            idle_pending = True
+        elif code == "prgr":
+            position_ms, _ = decode_progress(data)
+            known_duration = (state.get("track") or {}).get("duration_ms")
+            if sane_progress_position(position_ms, known_duration):
+                state["playback"]["position_ms"] = position_ms
+                state["playback"]["position_updated_at"] = timestamp
+        elif code == "pvol":
+            percent = decode_volume_percent(data)
+            state["settings"]["volume_percent"] = percent
+            state["settings"]["volume_raw"] = None
+        elif code == "snam":
+            state["session"]["user_name"] = decode_text(data)
+        elif code == "PICT" and data:
+            write_bytes_atomic(artwork_path, data)
+            update_track(state, covers=[artwork_url(artwork_base_url, data)])
+
+    state["updated_at"] = timestamp
+    state["last_event"] = {
+        "name": f"airplay:{item['type']}.{code}",
+        "received_at": timestamp,
+        "fields": item_fields(item),
+    }
+    return idle_pending, pause_after_write
+
+
+def write_idle(path: Path, timestamp: str) -> None:
+    with open_state_lock(path):
+        state = read_state(path)
+        if state.get("source", {}).get("kind") != "airplay":
+            return
+        state.update(
+            {
+                "updated_at": timestamp,
+                "last_event": {
+                    "name": "airplay:idle",
+                    "received_at": timestamp,
+                    "fields": {},
+                },
+                "track": None,
+            }
+        )
+        state["session"].update({"connected": False, "disconnected_at": timestamp})
+        state["playback"].update(
+            {
+                "status": "disconnected",
+                "is_playing": False,
+                "track_id": None,
+                "position_ms": None,
+                "position_updated_at": None,
+            }
+        )
+        set_idle_source(state, timestamp)
+        write_state(path, state)
+
+
+def apply_and_write(
+    path: Path,
+    raw_item: str,
+    artwork_path: Path,
+    artwork_base_url: str,
+) -> bool:
+    item = parse_item(raw_item)
+    if item is None:
+        return False
+    timestamp = now_iso()
+    pause_after_write = None
+    with open_state_lock(path):
+        state = read_state(path)
+        applied = apply_item(state, item, timestamp, artwork_path, artwork_base_url)
+        if applied is None:
+            return False
+        idle_pending, pause_after_write = applied
+        write_state(path, state)
+    if pause_after_write is not None:
+        pause_source(pause_after_write)
+    return idle_pending
+
+
+def open_input(path: str):
+    if path == "-":
+        return sys.stdin
+    while True:
+        try:
+            return Path(path).open("r", encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            print(f"airplay-event: waiting for metadata pipe {path}", file=sys.stderr)
+            time.sleep(2)
+
+
+def run(args: argparse.Namespace) -> int:
+    path = state_path()
+    artwork_path = Path(args.artwork_file)
+    idle_at: float | None = None
+
+    while True:
+        with open_input(args.metadata_pipe) as handle:
+            assembler = ItemAssembler()
+            while True:
+                timeout = None
+                if idle_at is not None:
+                    timeout = max(0, idle_at - time.monotonic())
+
+                if handle is sys.stdin:
+                    line = handle.readline()
+                    if line == "":
+                        return 0
+                else:
+                    ready, _, _ = select.select([handle], [], [], timeout)
+                    if not ready:
+                        write_idle(path, now_iso())
+                        idle_at = None
+                        continue
+                    line = handle.readline()
+                    if line == "":
+                        if idle_at is not None:
+                            remaining = idle_at - time.monotonic()
+                            if remaining > 0:
+                                time.sleep(remaining)
+                            write_idle(path, now_iso())
+                            idle_at = None
+                        break
+
+                for raw_item in assembler.feed(line):
+                    try:
+                        idle_pending = apply_and_write(
+                            path,
+                            raw_item,
+                            artwork_path,
+                            args.artwork_url,
+                        )
+                    except Exception as error:
+                        print(f"airplay-event: {error}", file=sys.stderr)
+                        return 1
+                    idle_at = time.monotonic() + args.idle_timeout if idle_pending else None
+
+        if args.metadata_pipe == "-":
+            return 0
+        time.sleep(0.25)
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--metadata-pipe",
+        default=os.environ.get("BLUERELIEF_AIRPLAY_METADATA_PIPE", DEFAULT_METADATA_PIPE),
+        help="shairport-sync metadata pipe path, or '-' for stdin",
+    )
+    parser.add_argument(
+        "--artwork-file",
+        default=os.environ.get("BLUERELIEF_AIRPLAY_ARTWORK_FILE", DEFAULT_ARTWORK_FILE),
+        help="where to store the latest AirPlay artwork bytes",
+    )
+    parser.add_argument(
+        "--artwork-url",
+        default=os.environ.get("BLUERELIEF_AIRPLAY_ARTWORK_URL", DEFAULT_ARTWORK_URL),
+        help="URL bluerelief-web serves for --artwork-file",
+    )
+    parser.add_argument(
+        "--idle-timeout",
+        type=float,
+        default=float(os.environ.get("BLUERELIEF_AIRPLAY_IDLE_TIMEOUT", "8")),
+        help="seconds after an AirPlay stop/disconnect before returning to idle",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    return run(parse_args(sys.argv[1:] if argv is None else argv))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

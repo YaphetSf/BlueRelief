@@ -1,0 +1,29 @@
+[Unit]
+Description=BlueRelief kiosk (sway + native Gio UI on DP)
+After=bluerelief-web.service seatd.service systemd-user-sessions.service
+Requires=bluerelief-web.service seatd.service
+
+[Service]
+Type=simple
+User=ding
+PAMName=login
+# PANEL=off in /etc/BlueRelief/bluerelief.conf skips this unit at start
+# instead of letting it run against a panel that isn't there.
+ExecCondition=/usr/local/bin/bluerelief-config check PANEL
+Environment=XDG_RUNTIME_DIR=/run/user/1001
+Environment=WLR_NO_HARDWARE_CURSORS=1
+ExecStartPre=/bin/sh -c 'until curl -sf http://127.0.0.1:8085/ >/dev/null; do sleep 0.5; done'
+ExecStart=/usr/bin/sway -c /etc/bluerelief/sway.config
+
+TimeoutStopSec=8
+Restart=always
+RestartSec=3
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

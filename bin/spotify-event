@@ -1,0 +1,507 @@
+#!/usr/bin/env python3
+"""librespot/Raspotify onevent bridge for the BlueRelief status display."""
+
+from __future__ import annotations
+
+import json
+import os
+import fcntl
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+DEFAULT_STATE_DIR = "/run/BlueRelief"
+DEFAULT_STATE_FILE = "state.json"
+DEFAULT_CONTROL_BASE_URL = "http://127.0.0.1:8085"
+VOLUME_MAX = 65535
+
+KNOWN_ENV_KEYS = {
+    "ALBUM",
+    "ALBUM_ARTISTS",
+    "ARTISTS",
+    "AUTO_PLAY",
+    "CLIENT_BRAND_NAME",
+    "CLIENT_ID",
+    "CLIENT_MODEL_NAME",
+    "CLIENT_NAME",
+    "CONNECTION_ID",
+    "COVERS",
+    "DESCRIPTION",
+    "DISC_NUMBER",
+    "DURATION_MS",
+    "FILTER",
+    "IS_EXPLICIT",
+    "ITEM_TYPE",
+    "LANGUAGE",
+    "NAME",
+    "NUMBER",
+    "OLD_TRACK_ID",
+    "PLAYER_EVENT",
+    "POPULARITY",
+    "POSITION_MS",
+    "PUBLISH_TIME",
+    "REPEAT",
+    "SHOW_NAME",
+    "SHUFFLE",
+    "SINK_STATUS",
+    "TRACK_ID",
+    "URI",
+    "USER_NAME",
+    "VOLUME",
+}
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def env_value(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value == "":
+        return None
+    return value
+
+
+def int_value(name: str) -> int | None:
+    value = env_value(name)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def bool_value(name: str) -> bool | None:
+    value = env_value(name)
+    if value is None:
+        return None
+
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def split_lines(name: str) -> list[str]:
+    value = env_value(name)
+    if value is None:
+        return []
+    return [part for part in value.splitlines() if part]
+
+
+def default_state() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "updated_at": None,
+        "last_event": None,
+        "source": {
+            "kind": "idle",
+            "name": "Idle",
+            "active": False,
+            "updated_at": None,
+        },
+        "capabilities": {
+            "transport": False,
+            "volume": False,
+            "seek": False,
+            "browse": False,
+            "queue": False,
+        },
+        "session": {
+            "connected": False,
+            "user_name": None,
+            "connection_id": None,
+            "connected_at": None,
+            "disconnected_at": None,
+        },
+        "client": {
+            "id": None,
+            "name": None,
+            "brand_name": None,
+            "model_name": None,
+        },
+        "playback": {
+            "status": "disconnected",
+            "is_playing": False,
+            "track_id": None,
+            "position_ms": None,
+            "position_updated_at": None,
+        },
+        "track": None,
+        "settings": {
+            "volume_raw": None,
+            "volume_percent": None,
+            "shuffle": None,
+            "repeat": None,
+            "auto_play": None,
+            "filter_explicit_content": None,
+        },
+        "sink": {
+            "status": None,
+            "updated_at": None,
+        },
+    }
+
+
+def state_path() -> Path:
+    explicit = os.environ.get("BLUERELIEF_STATE_FILE")
+    if explicit:
+        return Path(explicit)
+    return Path(os.environ.get("BLUERELIEF_STATE_DIR", DEFAULT_STATE_DIR)) / DEFAULT_STATE_FILE
+
+
+def state_lock_path(path: Path) -> Path:
+    explicit = os.environ.get("BLUERELIEF_STATE_LOCK")
+    if explicit:
+        return Path(explicit)
+    return path.with_name(f"{path.name}.lock")
+
+
+def open_state_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = state_lock_path(path).open("a+", encoding="utf-8")
+    try:
+        os.chmod(handle.name, 0o666)
+    except OSError:
+        pass
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    return handle
+
+
+def read_state(path: Path) -> dict[str, Any]:
+    state = default_state()
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return state
+    except json.JSONDecodeError as error:
+        state["last_error"] = f"could not parse previous state: {error}"
+        return state
+
+    if isinstance(existing, dict):
+        deep_update(state, existing)
+    return state
+
+
+def deep_update(target: dict[str, Any], source: dict[str, Any]) -> None:
+    for key, value in source.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            deep_update(target[key], value)
+        else:
+            target[key] = value
+
+
+def spotify_capabilities() -> dict[str, bool]:
+    return {
+        "transport": True,
+        "volume": True,
+        "seek": True,
+        "browse": True,
+        "queue": False,
+    }
+
+
+def set_spotify_source(state: dict[str, Any], timestamp: str, active: bool = True) -> None:
+    state["source"] = {
+        "kind": "spotify" if active else "idle",
+        "name": "Spotify" if active else "Idle",
+        "active": active,
+        "updated_at": timestamp,
+    }
+    state["capabilities"] = spotify_capabilities() if active else default_state()["capabilities"]
+
+
+def active_source_kind(state: dict[str, Any]) -> str | None:
+    source = state.get("source")
+    if isinstance(source, dict):
+        kind = str(source.get("kind") or "").strip().lower()
+        if kind and kind != "idle" and source.get("active", True):
+            return kind
+
+    # Legacy state files predate source.kind. If they were actively playing,
+    # the only possible source was Spotify.
+    playback = state.get("playback")
+    if isinstance(playback, dict) and playback.get("is_playing"):
+        return "spotify"
+    return None
+
+
+def spotify_claims_source(event: str) -> bool:
+    return event in {
+        "session_connected",
+        "track_changed",
+        "changed",
+        "playing",
+        "started",
+        "loading",
+    }
+
+
+def should_accept_spotify_event(state: dict[str, Any], event: str) -> bool:
+    current = active_source_kind(state)
+    return spotify_claims_source(event) or current in {None, "spotify"}
+
+
+def pause_source(source: str) -> None:
+    if source not in {"airplay", "spotify"}:
+        return
+    base_url = os.environ.get("BLUERELIEF_CONTROL_BASE_URL", DEFAULT_CONTROL_BASE_URL).rstrip("/")
+    url = f"{base_url}/api/control/pause?source={source}"
+    req = urllib.request.Request(url, method="POST")
+    try:
+        urllib.request.urlopen(req, timeout=1.5).close()
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError):
+        # Arbitration should never break state writes. If bluerelief-web is down
+        # or the old source refuses pause, the latest source still owns state.
+        pass
+
+
+def reset_playback_for_source_switch(state: dict[str, Any]) -> None:
+    state["track"] = None
+    state["playback"].update(
+        {
+            "track_id": None,
+            "position_ms": None,
+            "position_updated_at": None,
+        }
+    )
+
+
+def write_state(path: Path, state: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+        text=True,
+    )
+    tmp_path = Path(tmp_name)
+
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        tmp_path.chmod(0o644)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def event_fields() -> dict[str, str]:
+    return {key.lower(): os.environ[key] for key in sorted(KNOWN_ENV_KEYS) if key in os.environ}
+
+
+def track_from_env() -> dict[str, Any]:
+    return {
+        "item_type": env_value("ITEM_TYPE"),
+        "id": env_value("TRACK_ID"),
+        "uri": env_value("URI"),
+        "name": env_value("NAME"),
+        "duration_ms": int_value("DURATION_MS"),
+        "is_explicit": bool_value("IS_EXPLICIT"),
+        "language": split_lines("LANGUAGE"),
+        "covers": split_lines("COVERS"),
+        "number": int_value("NUMBER"),
+        "disc_number": int_value("DISC_NUMBER"),
+        "popularity": int_value("POPULARITY"),
+        "album": env_value("ALBUM"),
+        "artists": split_lines("ARTISTS"),
+        "album_artists": split_lines("ALBUM_ARTISTS"),
+        "show_name": env_value("SHOW_NAME"),
+        "publish_time": int_value("PUBLISH_TIME"),
+        "description": env_value("DESCRIPTION"),
+    }
+
+
+def remove_empty(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: remove_empty(item)
+            for key, item in value.items()
+            if item is not None and item != []
+        }
+    return value
+
+
+def update_position(state: dict[str, Any], timestamp: str) -> None:
+    track_id = env_value("TRACK_ID")
+    position_ms = int_value("POSITION_MS")
+
+    if track_id is not None:
+        state["playback"]["track_id"] = track_id
+    if position_ms is not None:
+        state["playback"]["position_ms"] = position_ms
+        state["playback"]["position_updated_at"] = timestamp
+
+
+def apply_event(state: dict[str, Any], timestamp: str) -> tuple[dict[str, Any], str | None] | None:
+    event = env_value("PLAYER_EVENT") or "unknown"
+    if not should_accept_spotify_event(state, event):
+        return None
+
+    previous_source = active_source_kind(state)
+    pause_after_write = (
+        previous_source
+        if spotify_claims_source(event) and previous_source not in {None, "spotify"}
+        else None
+    )
+
+    playback = state["playback"]
+    if pause_after_write is not None:
+        reset_playback_for_source_switch(state)
+    if spotify_claims_source(event) or previous_source == "spotify":
+        set_spotify_source(state, timestamp)
+
+    if event == "session_connected":
+        state["session"].update(
+            {
+                "connected": True,
+                "user_name": env_value("USER_NAME"),
+                "connection_id": env_value("CONNECTION_ID"),
+                "connected_at": timestamp,
+                "disconnected_at": None,
+            }
+        )
+        if playback.get("status") == "disconnected":
+            playback["status"] = "connected"
+
+    elif event == "session_disconnected":
+        state["session"].update(
+            {
+                "connected": False,
+                "user_name": env_value("USER_NAME") or state["session"].get("user_name"),
+                "connection_id": env_value("CONNECTION_ID") or state["session"].get("connection_id"),
+                "disconnected_at": timestamp,
+            }
+        )
+        playback.update(
+            {
+                "status": "disconnected",
+                "is_playing": False,
+                "track_id": None,
+                "position_ms": None,
+                "position_updated_at": None,
+            }
+        )
+        state["track"] = None
+        set_spotify_source(state, timestamp, active=False)
+
+    elif event == "session_client_changed":
+        state["client"].update(
+            {
+                "id": env_value("CLIENT_ID"),
+                "name": env_value("CLIENT_NAME"),
+                "brand_name": env_value("CLIENT_BRAND_NAME"),
+                "model_name": env_value("CLIENT_MODEL_NAME"),
+            }
+        )
+
+    elif event in {"track_changed", "changed"}:
+        state["track"] = remove_empty(track_from_env())
+        playback["track_id"] = env_value("TRACK_ID")
+        playback["position_ms"] = None
+        playback["position_updated_at"] = None
+
+    elif event in {"playing", "started"}:
+        playback["status"] = "playing"
+        playback["is_playing"] = True
+        update_position(state, timestamp)
+
+    elif event == "paused":
+        playback["status"] = "paused"
+        playback["is_playing"] = False
+        update_position(state, timestamp)
+
+    elif event in {"seeked", "position_correction"}:
+        update_position(state, timestamp)
+
+    elif event in {"stopped", "end_of_track"}:
+        playback["status"] = "stopped" if event == "stopped" else "ended"
+        playback["is_playing"] = False
+        update_position(state, timestamp)
+        if event == "stopped":
+            state["track"] = None
+
+    elif event == "loading":
+        playback["status"] = event
+        playback["is_playing"] = False
+        update_position(state, timestamp)
+
+    elif event in {"preloading", "preload_next"}:
+        pass
+
+    elif event == "unavailable":
+        if not playback.get("is_playing"):
+            playback["status"] = event
+            update_position(state, timestamp)
+
+    elif event in {"volume_changed", "volume_set"}:
+        volume = int_value("VOLUME")
+        state["settings"]["volume_raw"] = volume
+        state["settings"]["volume_percent"] = (
+            round((volume / VOLUME_MAX) * 100) if volume is not None else None
+        )
+
+    elif event == "shuffle_changed":
+        state["settings"]["shuffle"] = bool_value("SHUFFLE")
+
+    elif event == "repeat_changed":
+        state["settings"]["repeat"] = bool_value("REPEAT")
+
+    elif event == "auto_play_changed":
+        state["settings"]["auto_play"] = bool_value("AUTO_PLAY")
+
+    elif event == "filter_explicit_content_changed":
+        state["settings"]["filter_explicit_content"] = bool_value("FILTER")
+
+    elif event == "sink":
+        state["sink"].update(
+            {
+                "status": env_value("SINK_STATUS"),
+                "updated_at": timestamp,
+            }
+        )
+
+    state["updated_at"] = timestamp
+    state["last_event"] = {
+        "name": event,
+        "received_at": timestamp,
+        "fields": event_fields(),
+    }
+    return state, pause_after_write
+
+
+def main() -> int:
+    path = state_path()
+    timestamp = now_iso()
+
+    try:
+        pause_after_write = None
+        with open_state_lock(path):
+            applied = apply_event(read_state(path), timestamp)
+            if applied is not None:
+                state, pause_after_write = applied
+                write_state(path, state)
+        if pause_after_write is not None:
+            pause_source(pause_after_write)
+    except Exception as error:
+        print(f"spotify-event: {error}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

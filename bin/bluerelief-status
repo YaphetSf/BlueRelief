@@ -1,0 +1,229 @@
+#!/bin/sh
+# bluerelief-status — one-shot diagnostic for the BlueRelief kiosk on the board.
+#
+# Dumps which features are switched on, service health, HTTP reachability,
+# state.json freshness, kiosk processes, sway/DPMS state, and journal tails for
+# any service that isn't active. Intended to answer: "the UI is flickering /
+# nothing's showing up — where do I look first."
+#
+# It reads /etc/BlueRelief/bluerelief.conf first, so a feature you switched off
+# on purpose reports as off rather than as a failure. If something here looks
+# broken, check the switch before you check the service.
+#
+# Runs without arguments; safe to run anywhere (uses sudo only where the
+# kernel actually requires it, namely sway-ipc owned by user 1001).
+
+set -u
+
+bold() { printf '\033[1m── %s ──\033[0m\n' "$*"; }
+ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
+warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
+fail() { printf '  \033[31m✗\033[0m %s\n' "$*"; }
+off()  { printf '  \033[90m·\033[0m %s\n' "$*"; }
+dim()  { printf '    %s\n' "$*"; }
+
+# ── Feature switches ──────────────────────────────────────────────────
+# Parsed inline rather than shelling out to bluerelief-config, so this
+# diagnostic still works when that script is the thing that's broken.
+CONF=${BLUERELIEF_CONF:-/etc/BlueRelief/bluerelief.conf}
+
+conf_get() {
+  [ -f "$CONF" ] || return 0
+  sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$CONF" \
+    | tail -1 \
+    | sed 's/[[:space:]]*$//; s/^"\(.*\)"$/\1/'
+}
+
+# Fail-open, same rule as bluerelief-config: unknown or unset reads as on.
+conf_on() {
+  case "$(conf_get "$1")" in
+    off|OFF|Off|0|false|no) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+switch_for() {
+  case "$1" in
+    raspotify)                 echo SPOTIFY ;;
+    shairport-sync|bluerelief-airplay-bridge) echo AIRPLAY ;;
+    bluerelief-kiosk|bluerelief-gio|bluerelief-screen) echo PANEL ;;
+    bluerelief-watchdog.timer) echo WATCHDOG ;;
+    *) echo "" ;;
+  esac
+}
+
+bold "features"
+if [ -f "$CONF" ]; then
+  for key in SPOTIFY AIRPLAY PANEL WATCHDOG LYRICS; do
+    val=$(conf_get "$key")
+    [ -n "$val" ] || val="unset→on"
+    if conf_on "$key"; then ok "$key=$val"; else off "$key=$val"; fi
+  done
+  dim "idle=$(conf_get SCREEN_IDLE)  airplay-control=$(conf_get AIRPLAY_CONTROL)  $CONF"
+else
+  warn "$CONF missing — everything reads as on"
+  dim "install: etc/BlueRelief/bluerelief.conf.example"
+fi
+echo
+
+# ── Services ──────────────────────────────────────────────────────────
+bold "services"
+for svc in raspotify shairport-sync bluerelief-web bluerelief-airplay-bridge \
+           bluerelief-kiosk bluerelief-gio bluerelief-screen bluerelief-watchdog.timer; do
+  key=$(switch_for "$svc")
+  if [ -n "$key" ] && ! conf_on "$key"; then
+    off "$svc — off ($key=off)"
+    continue
+  fi
+  state=$(systemctl is-active "$svc" 2>/dev/null || true)
+  sub=$(systemctl show -p SubState --value "$svc" 2>/dev/null || true)
+  line="$svc — $state ($sub)"
+  case "$state" in
+    active)     ok   "$line" ;;
+    activating) warn "$line" ;;
+    *)          fail "$line" ;;
+  esac
+done
+echo
+
+# ── bluerelief-web HTTP ───────────────────────────────────────────────────
+bold "bluerelief-web (:8085)"
+code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
+  http://127.0.0.1:8085/ 2>/dev/null || true)
+case "$code" in
+  200) ok   "GET / → 200" ;;
+  "")  fail "no response (:8085 not listening?)" ;;
+  *)   fail "GET / → $code" ;;
+esac
+auth=$(curl -s --max-time 2 http://127.0.0.1:8085/api/auth/status 2>/dev/null || true)
+dim "/api/auth/status → ${auth:-<no response>}"
+echo
+
+# ── state.json (raspotify → spotify-event → /run/BlueRelief) ──────────────
+bold "playback state"
+state_path=/run/BlueRelief/state.json
+if [ -f "$state_path" ]; then
+  age=$(($(date +%s) - $(stat -c %Y "$state_path" 2>/dev/null || echo 0)))
+  ok "$state_path (updated ${age}s ago)"
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '"    is_playing=\(.playback.is_playing)  status=\(.playback.status)  track=\(.track.name // "—")"' \
+      "$state_path" 2>/dev/null || dim "(unparseable)"
+  else
+    # No jq on Debian-base by default — fall back to crude greps.
+    grep -oE '"(is_playing|status|name)"[^,}]*' "$state_path" | head -4 | sed 's/^/    /'
+  fi
+elif ! conf_on SPOTIFY && ! conf_on AIRPLAY; then
+  off "$state_path missing — both sources are switched off"
+else
+  fail "$state_path missing — no source has emitted an event yet"
+  dim "check: systemctl status raspotify; ls /run/BlueRelief/"
+fi
+echo
+
+# ── Kiosk processes + display ─────────────────────────────────────────
+# Both sections are meaningless with PANEL=off, and reporting them as
+# failures is exactly the false alarm this switch exists to stop.
+if ! conf_on PANEL; then
+  bold "panel"
+  off "PANEL=off — sway, the Gio UI and the blanking daemon are all skipped"
+  dim "the web UI is still live: ssh -L 8085:127.0.0.1:8085 BlueRelief"
+  dim "turn it back on: sudo bluerelief-config PANEL on"
+  echo
+else
+  bold "kiosk processes"
+  sway_pid=$(pgrep -f 'sway -c /etc/bluerelief/sway.config' | head -1 || true)
+  gio_pids=$(pgrep -f 'bluerelief-gio' || true)
+  gio_count=$(printf '%s\n' "$gio_pids" | grep -c .)
+
+  if [ -n "$sway_pid" ]; then ok "sway running (pid $sway_pid)"; else fail "sway not running"; fi
+
+  sock=$(ls /run/user/1001/sway-ipc.*.sock 2>/dev/null | head -1 || true)
+  tree=
+  if [ -n "$sock" ]; then
+    tree=$(sudo -u ding -E SWAYSOCK="$sock" swaymsg -t get_tree 2>/dev/null || true)
+  fi
+  gio_attached=
+  if [ -n "$tree" ] && printf '%s' "$tree" | grep -q -E '"app_id"[[:space:]]*:[[:space:]]*"bluerelief-gio"'; then
+    gio_attached=yes
+  fi
+
+  case "$gio_count" in
+    0) fail "bluerelief-gio not running (crash-loop?)"
+       dim "if the panel is unplugged: sudo bluerelief-config PANEL off" ;;
+    1) gio_pid=$(echo "$gio_pids" | head -1)
+       if [ "$gio_attached" = yes ]; then
+         ok "bluerelief-gio running (pid $gio_pid, window attached to current sway)"
+       elif [ -z "$sway_pid" ] || [ -z "$sock" ] || [ -z "$tree" ]; then
+         warn "bluerelief-gio running (pid $gio_pid); can't verify sway attachment (sway-ipc unavailable)"
+       else
+         fail "bluerelief-gio running (pid $gio_pid) but has no window in current sway — orphan from a dead compositor"
+         dim "fix: sudo systemctl restart bluerelief-kiosk"
+       fi
+       ;;
+    *) fail "$gio_count bluerelief-gio processes running — duplicate?"
+       printf '%s\n' "$gio_pids" | sed 's/^/    pid /'
+       dim "fix: sudo systemctl restart bluerelief-gio" ;;
+  esac
+  echo
+
+  bold "display"
+  # Is the panel physically there at all? sway showing zero outputs and the
+  # connector reading "disconnected" is a cable/power problem, not a bug.
+  for st in /sys/class/drm/card*/card*-*/status; do
+    [ -e "$st" ] || continue
+    conn=$(basename "$(dirname "$st")")
+    case "$(cat "$st" 2>/dev/null)" in
+      connected) ok "$conn connected" ;;
+      *)         warn "$conn $(cat "$st" 2>/dev/null)" ;;
+    esac
+  done
+  sock=$(ls /run/user/1001/sway-ipc.*.sock 2>/dev/null | head -1 || true)
+  if [ -z "$sock" ]; then
+    warn "no sway-ipc socket under /run/user/1001 — bluerelief-screen has nothing to talk to"
+  else
+    ok "sway-ipc at $sock"
+    # Talk to sway as the owning user so the IPC handshake succeeds.
+    outputs=$(sudo -u ding -E SWAYSOCK="$sock" swaymsg -t get_outputs 2>/dev/null || true)
+    if [ "$(printf '%s' "$outputs" | tr -d '[:space:]')" = "[]" ]; then
+      fail "sway has zero outputs — nothing is plugged into DP/HDMI"
+      dim "if that's intentional: sudo bluerelief-config PANEL off"
+    elif [ -n "$outputs" ]; then
+      # active/dpms are JSON booleans; the val() helper handles both quoted
+      # strings and bare true/false so a single parser covers every field.
+      echo "$outputs" | awk '
+        function val(line, key,    re, v) {
+          re = "\"" key "\":[[:space:]]*(\"[^\"]*\"|true|false|null)"
+          if (match(line, re)) {
+            v = substr(line, RSTART, RLENGTH)
+            sub("\"" key "\":[[:space:]]*", "", v)
+            gsub("\"", "", v)
+            return v
+          }
+          return ""
+        }
+        /"name":/   { n = val($0, "name") }
+        /"active":/ { if (n != "") print "    " n ": active=" val($0, "active") }
+        /"dpms":/   { if (n != "") print "    " n ": dpms="   val($0, "dpms")   }
+      '
+    else
+      warn "swaymsg get_outputs returned nothing"
+    fi
+  fi
+  echo
+fi
+
+# ── Recent logs for any unhealthy service ─────────────────────────────
+bold "recent logs (only for non-active services)"
+shown=0
+for svc in bluerelief-web bluerelief-kiosk bluerelief-screen raspotify; do
+  key=$(switch_for "$svc")
+  if [ -n "$key" ] && ! conf_on "$key"; then
+    continue
+  fi
+  if [ "$(systemctl is-active "$svc" 2>/dev/null)" != "active" ]; then
+    printf '\n  ── journalctl -u %s -n 15 ──\n' "$svc"
+    journalctl -u "$svc" -n 15 --no-pager 2>/dev/null | sed 's/^/    /'
+    shown=1
+  fi
+done
+[ "$shown" = 0 ] && dim "(all switched-on services active — no tails)"

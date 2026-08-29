@@ -1,0 +1,220 @@
+#!/bin/sh
+# bluerelief-config — read and flip BlueRelief's feature switches.
+#
+# Every feature on the board is one key in /etc/BlueRelief/bluerelief.conf.
+# This script is the only thing that should write that file: it validates the
+# value, then reconciles the running units so the board matches the file.
+#
+#   bluerelief-config                  show every key, its value, what it gates
+#   bluerelief-config PANEL off        set a key, then apply
+#   bluerelief-config apply            reconcile after hand-editing the file
+#   bluerelief-config check PANEL      exit 0 if on, 1 if off
+#
+# `check` is what systemd calls from ExecCondition=, which is why the switches
+# survive a reboot without any enable/disable bookkeeping: units stay enabled,
+# and a unit whose switch is off is skipped at start instead of crash-looping.
+#
+# Fail-open: a missing file, a missing key, or a value we don't recognise reads
+# as "on". A config mistake must never silence the music.
+
+set -u
+
+CONF=${BLUERELIEF_CONF:-/etc/BlueRelief/bluerelief.conf}
+
+SWITCHES="SPOTIFY AIRPLAY PANEL WATCHDOG LYRICS"
+TUNABLES="SCREEN_IDLE SPOTIFY_CLIENT_ID SPOTIFY_DEVICE_NAME AIRPLAY_CONTROL"
+
+# Units each switch gates via ExecCondition. LYRICS has none — it is a flag
+# inside bluerelief-web, so flipping it restarts the server instead.
+units_for() {
+    case "$1" in
+        SPOTIFY)  echo "raspotify.service" ;;
+        AIRPLAY)  echo "shairport-sync.service bluerelief-airplay-bridge.service" ;;
+        PANEL)    echo "bluerelief-kiosk.service bluerelief-gio.service bluerelief-screen.service" ;;
+        WATCHDOG) echo "bluerelief-watchdog.timer" ;;
+        *)        echo "" ;;
+    esac
+}
+
+describe() {
+    case "$1" in
+        SPOTIFY)             echo "Spotify Connect (raspotify/librespot)" ;;
+        AIRPLAY)             echo "AirPlay receiver (shairport-sync + bridge)" ;;
+        PANEL)               echo "DP touch panel: sway + Gio UI + blanking" ;;
+        WATCHDOG)            echo "2-min probe that unwedges librespot" ;;
+        LYRICS)              echo "LRCLIB synced lyrics" ;;
+        SCREEN_IDLE)         echo "idle time before the panel blanks" ;;
+        SPOTIFY_CLIENT_ID)   echo "Spotify Web API control link (empty = read-only UI)" ;;
+        SPOTIFY_DEVICE_NAME) echo "librespot device name the control link targets" ;;
+        AIRPLAY_CONTROL)     echo "AirPlay transport backend" ;;
+        *)                   echo "" ;;
+    esac
+}
+
+# Last assignment wins, matching how systemd parses an EnvironmentFile.
+get() {
+    [ -f "$CONF" ] || return 0
+    sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$CONF" \
+        | tail -1 \
+        | sed 's/[[:space:]]*$//; s/^"\(.*\)"$/\1/'
+}
+
+is_on() {
+    case "$(get "$1")" in
+        off|OFF|Off|0|false|no) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+validate() {
+    key=$1
+    val=$2
+    case " $SWITCHES " in
+        *" $key "*)
+            case "$val" in
+                on|off) return 0 ;;
+                *) echo "bluerelief-config: $key takes on|off, got '$val'" >&2; return 1 ;;
+            esac
+            ;;
+    esac
+    case "$key" in
+        SCREEN_IDLE)
+            case "$val" in
+                off) return 0 ;;
+                *[0-9]s|*[0-9]m|*[0-9]h) return 0 ;;
+                *) echo "bluerelief-config: SCREEN_IDLE takes a Go duration (30s, 5m, 1h) or off, got '$val'" >&2; return 1 ;;
+            esac
+            ;;
+        AIRPLAY_CONTROL)
+            case "$val" in
+                mpris|playerctl|none) return 0 ;;
+                *) echo "bluerelief-config: AIRPLAY_CONTROL takes mpris|playerctl|none, got '$val'" >&2; return 1 ;;
+            esac
+            ;;
+        SPOTIFY_CLIENT_ID|SPOTIFY_DEVICE_NAME)
+            return 0
+            ;;
+    esac
+    echo "bluerelief-config: unknown key '$key'" >&2
+    echo "  switches: $SWITCHES" >&2
+    echo "  tunables: $TUNABLES" >&2
+    return 1
+}
+
+show() {
+    if [ ! -f "$CONF" ]; then
+        echo "$CONF does not exist — every feature reads as on."
+        echo "Install it from etc/BlueRelief/bluerelief.conf.example."
+        return
+    fi
+    printf '\033[1m── switches ──\033[0m\n'
+    for key in $SWITCHES; do
+        val=$(get "$key")
+        [ -n "$val" ] || val="(unset → on)"
+        if is_on "$key"; then colour=32; else colour=33; fi
+        printf '  \033[%sm%-20s %-6s\033[0m %s\n' "$colour" "$key" "$val" "$(describe "$key")"
+    done
+    printf '\n\033[1m── tunables ──\033[0m\n'
+    # Size the value column to the widest value actually present — a 32-char
+    # Spotify client ID overflows any width picked in advance and shunts the
+    # description column out of alignment.
+    width=0
+    for key in $TUNABLES; do
+        val=$(get "$key")
+        [ -n "$val" ] || val="(unset)"
+        len=${#val}
+        [ "$len" -gt "$width" ] && width=$len
+    done
+    for key in $TUNABLES; do
+        val=$(get "$key")
+        [ -n "$val" ] || val="(unset)"
+        printf "  %-20s %-${width}s  %s\n" "$key" "$val" "$(describe "$key")"
+    done
+    printf '\n  %s\n' "$CONF"
+    printf '  change with: bluerelief-config <KEY> <VALUE>\n'
+}
+
+write_key() {
+    key=$1
+    val=$2
+    if [ ! -f "$CONF" ]; then
+        echo "bluerelief-config: $CONF does not exist" >&2
+        exit 1
+    fi
+    tmp=$(mktemp)
+    if grep -Eq "^[[:space:]]*$key[[:space:]]*=" "$CONF"; then
+        sed -E "s|^[[:space:]]*$key[[:space:]]*=.*|$key=$val|" "$CONF" >"$tmp"
+    else
+        cat "$CONF" >"$tmp"
+        printf '%s=%s\n' "$key" "$val" >>"$tmp"
+    fi
+    install -m 0644 "$tmp" "$CONF"
+    rm -f "$tmp"
+}
+
+# Writing the config and driving systemd both need root. Elevate on the
+# writability of the config rather than on id -u, so a root shell never
+# re-execs and a test run against a writable BLUERELIEF_CONF stays in-process.
+# --preserve-env is required: plain sudo would drop BLUERELIEF_CONF.
+maybe_sudo() {
+    if [ "$(id -u)" = 0 ] || [ -w "$CONF" ]; then
+        return 0
+    fi
+    exec sudo --preserve-env=BLUERELIEF_CONF -- "$0" "$@"
+}
+
+# Bring the running system in line with the file. Units stay enabled either
+# way — ExecCondition handles the boot path, this handles right now.
+apply() {
+    for key in $SWITCHES; do
+        units=$(units_for "$key")
+        [ -n "$units" ] || continue
+        if is_on "$key"; then
+            # shellcheck disable=SC2086
+            systemctl start $units >/dev/null 2>&1 \
+                || echo "  ! could not start: $units" >&2
+        else
+            # shellcheck disable=SC2086
+            systemctl stop $units >/dev/null 2>&1 || true
+        fi
+    done
+    # Tunables live in bluerelief-web's / bluerelief-screen's environment, so
+    # they only take effect on restart. try-restart leaves stopped units alone.
+    systemctl try-restart bluerelief-web.service >/dev/null 2>&1 || true
+    systemctl try-restart bluerelief-screen.service >/dev/null 2>&1 || true
+}
+
+cmd=${1:-}
+
+case "$cmd" in
+    ""|show|-h|--help|help)
+        show
+        ;;
+    check)
+        key=${2:-}
+        if [ -z "$key" ]; then
+            echo "usage: bluerelief-config check <KEY>" >&2
+            exit 0 # fail-open: never block a unit over a usage error
+        fi
+        is_on "$key"
+        ;;
+    apply)
+        maybe_sudo apply
+        apply
+        show
+        ;;
+    *)
+        key=$cmd
+        val=${2:-}
+        if [ -z "$val" ]; then
+            echo "usage: bluerelief-config <KEY> <VALUE>" >&2
+            echo "       bluerelief-config            (show everything)" >&2
+            exit 1
+        fi
+        validate "$key" "$val" || exit 1
+        maybe_sudo "$key" "$val"
+        write_key "$key" "$val"
+        apply
+        show
+        ;;
+esac

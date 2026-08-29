@@ -1,0 +1,60 @@
+{
+  "client": {
+    "brand_name": null,
+    "id": null,
+    "model_name": null,
+    "name": null
+  },
+  "last_event": {
+    "fields": {
+      "player_event": "playing",
+      "position_ms": "42000",
+      "track_id": "10Nmj3JCNoMeBQ87uw5j8k",
+      "volume": "45875"
+    },
+    "name": "playing",
+    "received_at": "2026-05-14T22:05:14.370Z"
+  },
+  "playback": {
+    "is_playing": true,
+    "position_ms": 42000,
+    "position_updated_at": "2026-05-14T22:05:14.370Z",
+    "status": "playing",
+    "track_id": "10Nmj3JCNoMeBQ87uw5j8k"
+  },
+  "schema_version": 1,
+  "session": {
+    "connected": false,
+    "connected_at": null,
+    "connection_id": null,
+    "disconnected_at": null,
+    "user_name": null
+  },
+  "settings": {
+    "auto_play": null,
+    "filter_explicit_content": null,
+    "repeat": null,
+    "shuffle": null,
+    "volume_percent": null,
+    "volume_raw": null
+  },
+  "sink": {
+    "status": null,
+    "updated_at": null
+  },
+  "track": {
+    "album": "Stadium Arcadium",
+    "artists": [
+      "Red Hot Chili Peppers"
+    ],
+    "covers": [
+      "https://i.scdn.co/image/ab67616d0000b273abcdef"
+    ],
+    "duration_ms": 282160,
+    "id": "10Nmj3JCNoMeBQ87uw5j8k",
+    "item_type": "track",
+    "name": "Dani California",
+    "uri": "spotify:track:10Nmj3JCNoMeBQ87uw5j8k"
+  },
+  "updated_at": "2026-05-14T22:05:14.370Z"
+}

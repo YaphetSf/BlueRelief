@@ -1,0 +1,25 @@
+[Unit]
+Description=BlueRelief HTTP server (state.json -> web UI + Spotify control link)
+After=network-online.target raspotify.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ding
+# StateDirectory= creates /var/lib/BlueRelief (owned by User=) at start. That's
+# where bluerelief-auth's token lives; survives reboots, unlike /run.
+StateDirectory=BlueRelief
+StateDirectoryMode=0700
+# The one runtime config. Optional: without it every feature reads as on and
+# the control link is simply disabled (the read-only UI keeps working).
+# Keys read here: SPOTIFY_CLIENT_ID, SPOTIFY_DEVICE_NAME, AIRPLAY_CONTROL, LYRICS.
+EnvironmentFile=-/etc/BlueRelief/bluerelief.conf
+ExecStart=/usr/local/bin/bluerelief-web \
+  --addr 127.0.0.1:8085 \
+  --state /run/BlueRelief/state.json \
+  --spotify-token /var/lib/BlueRelief/spotify-token.json
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

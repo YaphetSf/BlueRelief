@@ -1,0 +1,17 @@
+# BlueRelief kiosk compositor.
+#
+# Sway remains as the kiosk compositor because it handles the wch.cn USB-I²C
+# touch controller (`event7`) correctly on Debian 12/wlroots 0.15.
+
+# Block any per-user sway/config from polluting the kiosk.
+include /dev/null
+
+default_border none
+default_floating_border none
+hide_edge_borders --i3 both
+
+# Touchscreen kiosk — no cursor.
+seat * hide_cursor 1
+
+# Gio sets the window title from app.Title("BlueRelief").
+for_window [title="BlueRelief"] fullscreen enable, border none
