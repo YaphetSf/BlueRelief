@@ -225,7 +225,7 @@ elif [ "$dmc_min" = "$dmc_max" ]; then
   ok "DDR pinned at $((dmc_min / 1000000)) MHz"
 else
   fail "DDR scaling live, $((dmc_min / 1000000))–$((dmc_max / 1000000)) MHz"
-  dim "prime suspect for a hang with no logs — 60-rk3399-dmc-pin.rules did not apply"
+  dim "prime suspect for a hang with no logs — rk3399-clocks.conf did not apply"
 fi
 
 wdog=$(systemctl show -p RuntimeWatchdogUSec --value 2>/dev/null || true)

@@ -64,7 +64,7 @@ state the board was in when it hung twice in silence.
 
 | File | Fixes |
 |---|---|
-| `etc/udev/rules.d/60-rk3399-dmc-pin.rules` | pins DDR at 666 MHz — RK3399 DDR scaling switches clocks from ATF and hangs the SoC with nothing in the log |
+| `etc/tmpfiles.d/rk3399-clocks.conf` | pins DDR at 328 MHz and caps the A72 pair at 1008 MHz — RK3399 DDR scaling switches clocks from ATF and hangs the SoC with nothing in the log; 328 MHz is where the governor already sat for 99% of uptime, and runs 6 °C cooler than pinning at the 666 MHz ceiling |
 | `etc/systemd/system.conf.d/10-watchdog.conf` | arms the dw_wdt, so a hang costs a 60 s reboot instead of lasting until someone notices |
 | `etc/systemd/journald.conf.d/10-sync.conf` | 10 s journal fsync — the 5 m default drops exactly the window that would explain a hang |
 | `etc/systemd/system/wifi-regdomain.service` | `iw reg set GB` — cfg80211 is built into this kernel, so `modprobe.d` never reaches it and the board boots as regdomain 00 |

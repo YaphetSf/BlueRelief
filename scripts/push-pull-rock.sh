@@ -276,10 +276,9 @@ echo "Syncing host tunables..."
 # comes back without. Two silent SoC hangs (2026-08-30, 2026-09-01) left no
 # kernel output and nothing to reboot the board; the DDR pin removes the prime
 # suspect and the watchdog stops the next one lasting until someone notices.
-if sync_file etc/udev/rules.d/60-rk3399-dmc-pin.rules \
-    /etc/udev/rules.d/60-rk3399-dmc-pin.rules 0644; then
-  sudo udevadm control --reload
-  sudo udevadm trigger --subsystem-match=devfreq
+if sync_file etc/tmpfiles.d/rk3399-clocks.conf \
+    /etc/tmpfiles.d/rk3399-clocks.conf 0644; then
+  sudo systemd-tmpfiles --create /etc/tmpfiles.d/rk3399-clocks.conf
 fi
 if sync_file etc/systemd/system.conf.d/10-watchdog.conf \
     /etc/systemd/system.conf.d/10-watchdog.conf 0644; then

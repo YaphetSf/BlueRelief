@@ -1,4 +1,0 @@
-# RK3399 DDR frequency scaling (DMC devfreq) switches DDR clocks from ATF and is
-# a known cause of silent hard hangs with no kernel output. Pinning min to max
-# leaves the governor loaded but with nowhere to go.
-SUBSYSTEM=="devfreq", KERNEL=="dmc", ATTR{min_freq}="666000000"
