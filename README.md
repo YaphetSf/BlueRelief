@@ -56,6 +56,23 @@ ssh BlueRelief 'journalctl -u bluerelief-web -n 50'
 ssh -L 8085:127.0.0.1:8085 BlueRelief   # then open http://localhost:8085
 ```
 
+## Host tunables
+
+Board-level files the deploy syncs alongside the units. They are not features,
+have no switch, and a reflashed board comes back without them — which is the
+state the board was in when it hung twice in silence.
+
+| File | Fixes |
+|---|---|
+| `etc/udev/rules.d/60-rk3399-dmc-pin.rules` | pins DDR at 666 MHz — RK3399 DDR scaling switches clocks from ATF and hangs the SoC with nothing in the log |
+| `etc/systemd/system.conf.d/10-watchdog.conf` | arms the dw_wdt, so a hang costs a 60 s reboot instead of lasting until someone notices |
+| `etc/systemd/journald.conf.d/10-sync.conf` | 10 s journal fsync — the 5 m default drops exactly the window that would explain a hang |
+| `etc/systemd/system/wifi-regdomain.service` | `iw reg set GB` — cfg80211 is built into this kernel, so `modprobe.d` never reaches it and the board boots as regdomain 00 |
+| `etc/NetworkManager/conf.d/20-wifi-powersave.conf` | Broadcom SDIO power save off — it cost 40 ms of median latency and read as a flaky link |
+
+`bluerelief-status` reports the first four under **hang guards**; if the board
+hangs again, that is the first thing to read.
+
 ## Preview on the Mac
 
 ```sh

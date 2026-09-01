@@ -1,0 +1,16 @@
+[Unit]
+Description=Set the WiFi regulatory domain
+# cfg80211 is built into this kernel (CONFIG_CFG80211=y), so a modprobe.d
+# option never reaches it and the board comes up as regdomain 00: every 5 GHz
+# band passive-scan only and TX capped at 20 dBm. The AP is a UK unit on ch149.
+# Doing it here rather than on the kernel cmdline keeps u-boot-update, and so
+# the board's ability to boot, out of the blast radius.
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/iw reg set GB
+
+[Install]
+WantedBy=multi-user.target

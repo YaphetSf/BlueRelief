@@ -250,7 +250,8 @@ if [ "$reload_systemd" = 1 ]; then
     bluerelief-gio.service \
     bluerelief-screen.service \
     bluerelief-airplay-bridge.service \
-    bluerelief-watchdog.timer
+    bluerelief-watchdog.timer \
+    wifi-regdomain.service
 fi
 
 echo "Retiring pre-rename services..."
@@ -269,6 +270,36 @@ sudo rm -f \
   "/usr/local/bin/$legacy_prefix-status" \
   "/usr/local/bin/$legacy_prefix-watchdog"
 sudo systemctl daemon-reload
+
+echo "Syncing host tunables..."
+# Not BlueRelief features: RK3399 and Broadcom-WiFi fixes a reflashed board
+# comes back without. Two silent SoC hangs (2026-08-30, 2026-09-01) left no
+# kernel output and nothing to reboot the board; the DDR pin removes the prime
+# suspect and the watchdog stops the next one lasting until someone notices.
+if sync_file etc/udev/rules.d/60-rk3399-dmc-pin.rules \
+    /etc/udev/rules.d/60-rk3399-dmc-pin.rules 0644; then
+  sudo udevadm control --reload
+  sudo udevadm trigger --subsystem-match=devfreq
+fi
+if sync_file etc/systemd/system.conf.d/10-watchdog.conf \
+    /etc/systemd/system.conf.d/10-watchdog.conf 0644; then
+  sudo systemctl daemon-reexec
+fi
+if sync_file etc/systemd/journald.conf.d/10-sync.conf \
+    /etc/systemd/journald.conf.d/10-sync.conf 0644; then
+  sudo systemctl restart systemd-journald
+fi
+if sync_file etc/NetworkManager/conf.d/20-wifi-powersave.conf \
+    /etc/NetworkManager/conf.d/20-wifi-powersave.conf 0644; then
+  sudo nmcli connection reload
+fi
+# wifi-regdomain.service runs iw; without the package the board silently stays
+# on regdomain 00.
+if [ ! -x /usr/sbin/iw ]; then
+  echo "  installing iw (wifi-regdomain.service needs it)"
+  sudo apt-get install -y -q iw
+fi
+sudo systemctl start wifi-regdomain.service
 
 # Every switch is enforced by ExecCondition= at boot; this reconciles what is
 # running right now to whatever the config says.

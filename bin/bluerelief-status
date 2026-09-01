@@ -212,6 +212,45 @@ else
   echo
 fi
 
+# ── Host-level hang guards ────────────────────────────────────────────
+# Two silent SoC hangs (2026-08-30, 2026-09-01) produced no kernel output, and
+# nothing rebooted the board, so it stayed dead for 9 and 33 hours. These four
+# are what changed afterwards; a reflashed board comes back without them.
+bold "hang guards"
+dmc_min=$(cat /sys/class/devfreq/dmc/min_freq 2>/dev/null || true)
+dmc_max=$(cat /sys/class/devfreq/dmc/max_freq 2>/dev/null || true)
+if [ -z "$dmc_min" ] || [ -z "$dmc_max" ]; then
+  warn "no dmc devfreq — this kernel does not expose DDR scaling"
+elif [ "$dmc_min" = "$dmc_max" ]; then
+  ok "DDR pinned at $((dmc_min / 1000000)) MHz"
+else
+  fail "DDR scaling live, $((dmc_min / 1000000))–$((dmc_max / 1000000)) MHz"
+  dim "prime suspect for a hang with no logs — 60-rk3399-dmc-pin.rules did not apply"
+fi
+
+wdog=$(systemctl show -p RuntimeWatchdogUSec --value 2>/dev/null || true)
+case "$wdog" in
+  ''|0|off) fail "hardware watchdog off — a hang lasts until someone pulls power" ;;
+  *)        ok "hardware watchdog $wdog" ;;
+esac
+
+jsync=$(sed -n 's/^SyncIntervalSec=//p' \
+  /etc/systemd/journald.conf.d/10-sync.conf 2>/dev/null | tail -1)
+if [ -n "$jsync" ]; then
+  ok "journal fsync every $jsync"
+else
+  warn "journal fsync at the 5m default — a hang loses its last 5 minutes"
+fi
+
+reg=$(/usr/sbin/iw reg get 2>/dev/null \
+  | sed -n 's/^country \([A-Z0-9]*\):.*/\1/p' | head -1)
+case "$reg" in
+  '') warn "regdomain unreadable — is iw installed?" ;;
+  00) fail "regdomain 00 — 5 GHz passive-scan only, TX capped at 20 dBm" ;;
+  *)  ok "wifi regdomain $reg" ;;
+esac
+echo
+
 # ── Recent logs for any unhealthy service ─────────────────────────────
 bold "recent logs (only for non-active services)"
 shown=0
