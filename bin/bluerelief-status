@@ -242,13 +242,39 @@ else
   warn "journal fsync at the 5m default — a hang loses its last 5 minutes"
 fi
 
-reg=$(/usr/sbin/iw reg get 2>/dev/null \
-  | sed -n 's/^country \([A-Z0-9]*\):.*/\1/p' | head -1)
-case "$reg" in
-  '') warn "regdomain unreadable — is iw installed?" ;;
-  00) fail "regdomain 00 — 5 GHz passive-scan only, TX capped at 20 dBm" ;;
-  *)  ok "wifi regdomain $reg" ;;
-esac
+# `iw reg get` prints two stanzas and on this board they disagree:
+# wifi-regdomain.service sets the global domain, but the Broadcom phy is
+# self-managed and keeps its own. Reading the first `country` line — which this
+# check used to do — reports the global one and so calls a radio healthy while
+# it cannot see half the 5 GHz band. The phy stanza is the one with teeth.
+reg_out=$(/usr/sbin/iw reg get 2>/dev/null || true)
+reg_global=$(printf '%s\n' "$reg_out" \
+  | awk '/^global/{g=1;next} g&&/^country/{sub(/:.*/,"",$2);print $2;exit}')
+reg_phy=$(printf '%s\n' "$reg_out" \
+  | awk '/^phy#/{p=1;next} p&&/^country/{sub(/:.*/,"",$2);print $2;exit}')
+# Channels the radio will actually touch, which is the question the domain is a
+# proxy for. `disabled` lines are advertised but unusable, so drop them.
+chans=$(/usr/sbin/iw phy 2>/dev/null | grep -v disabled \
+  | sed -n 's/.*\* \([0-9]*\) MHz \[[0-9]*\].*/\1/p')
+n24=$(printf '%s\n' "$chans" | awk '$1>0&&$1<2500' | wc -l | tr -d ' ')
+n5=$(printf '%s\n' "$chans"  | awk '$1>=5000'      | wc -l | tr -d ' ')
+ndfs=$(printf '%s\n' "$chans" | awk '$1>=5250&&$1<=5730' | wc -l | tr -d ' ')
+
+if [ -z "$reg_out" ]; then
+  warn "regdomain unreadable — is iw installed?"
+elif [ -z "$reg_phy" ] || [ "$reg_phy" = "$reg_global" ]; then
+  case "$reg_global" in
+    00) fail "regdomain 00 — 5 GHz passive-scan only, TX capped at 20 dBm" ;;
+    *)  ok "wifi regdomain $reg_global — $n24 ch on 2.4G, $n5 on 5G" ;;
+  esac
+else
+  ok "wifi regdomain $reg_phy on phy — $n24 ch on 2.4G, $n5 on 5G"
+  dim "phy is self-managed and ignores the global domain ($reg_global) that"
+  dim "wifi-regdomain.service sets — only the phy figure above binds"
+fi
+if [ -n "$reg_out" ] && [ "$ndfs" = 0 ]; then
+  dim "no DFS channels (52-140) — an AP that moves there becomes invisible"
+fi
 echo
 
 # ── Recent logs for any unhealthy service ─────────────────────────────

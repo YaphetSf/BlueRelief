@@ -1,0 +1,21 @@
+// Let the sudo group drive NetworkManager without an interactive polkit agent.
+//
+// The NetworkManager actions default to allow_active=yes, but "active" means a
+// session attached to a seat. An SSH session is Remote=yes with no seat, so it
+// falls through to allow_any=auth_admin, and polkit then looks for an agent to
+// authenticate against — which a headless board does not have.
+//
+// The symptom is not an error message, which is what makes it expensive: nmtui
+// asks NetworkManager to rescan, the request is refused with "not authorized",
+// and nmtui silently falls back to the last cached scan. A network added to the
+// house after that cache was filled simply never appears in the list, and the
+// radio looks broken when it is fine.
+//
+// Sorts before 50-default.rules so it wins: polkit takes the first rule that
+// returns a result.
+polkit.addRule(function (action, subject) {
+  if (action.id.indexOf("org.freedesktop.NetworkManager.") === 0 &&
+      subject.isInGroup("sudo")) {
+    return polkit.Result.YES;
+  }
+});

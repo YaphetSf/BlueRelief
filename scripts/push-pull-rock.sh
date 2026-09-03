@@ -292,6 +292,12 @@ if sync_file etc/NetworkManager/conf.d/20-wifi-powersave.conf \
     /etc/NetworkManager/conf.d/20-wifi-powersave.conf 0644; then
   sudo nmcli connection reload
 fi
+# Without this, nmtui over ssh can never rescan: a remote session has no seat,
+# so NM's polkit actions fall through to auth_admin with no agent to answer.
+if sync_file etc/polkit-1/rules.d/49-nm-sudo.rules \
+    /etc/polkit-1/rules.d/49-nm-sudo.rules 0644; then
+  sudo systemctl try-restart polkit
+fi
 # wifi-regdomain.service runs iw; without the package the board silently stays
 # on regdomain 00.
 if [ ! -x /usr/sbin/iw ]; then

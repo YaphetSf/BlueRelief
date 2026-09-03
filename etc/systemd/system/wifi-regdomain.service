@@ -1,10 +1,19 @@
 [Unit]
 Description=Set the WiFi regulatory domain
 # cfg80211 is built into this kernel (CONFIG_CFG80211=y), so a modprobe.d
-# option never reaches it and the board comes up as regdomain 00: every 5 GHz
-# band passive-scan only and TX capped at 20 dBm. The AP is a UK unit on ch149.
+# option never reaches it and the board would otherwise come up as regdomain 00.
 # Doing it here rather than on the kernel cmdline keeps u-boot-update, and so
 # the board's ability to boot, out of the blast radius.
+#
+# Know what this does NOT do before you trust it: the on-board Broadcom phy is
+# self-managed. It keeps its own domain (country 99) and ignores the global one
+# set here, so `iw reg get` prints GB and 99 side by side and only the second
+# governs wlan0. In particular this does not restore the DFS channels (52-140),
+# which that phy omits from its channel list entirely — an AP that moves there
+# goes invisible to this board no matter what is set here. What it still buys is
+# the domain any non-self-managed radio would use, and staying off regdomain 00.
+# `bluerelief-status` reports the phy's own country next to the global one so
+# the two are never read as the same thing again.
 After=network-pre.target
 Wants=network-pre.target
 
