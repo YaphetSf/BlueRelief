@@ -22,6 +22,17 @@ fail() { printf '  \033[31m✗\033[0m %s\n' "$*"; }
 off()  { printf '  \033[90m·\033[0m %s\n' "$*"; }
 dim()  { printf '    %s\n' "$*"; }
 
+# raspotify runs as root, so an unprivileged reader gets an empty tail from
+# journalctl rather than an error — "no access" renders as "no errors", which
+# is the worst possible way to be wrong in a diagnostic. Escalate when we can.
+jctl() {
+  if sudo -n true 2>/dev/null; then
+    sudo journalctl "$@"
+  else
+    journalctl "$@"
+  fi
+}
+
 # ── Feature switches ──────────────────────────────────────────────────
 # Parsed inline rather than shelling out to bluerelief-config, so this
 # diagnostic still works when that script is the thing that's broken.
@@ -279,6 +290,16 @@ echo
 
 # ── Recent logs for any unhealthy service ─────────────────────────────
 bold "recent logs (only for non-active services)"
+# librespot honours --quiet, and raspotify carries the switch in its own conf.
+# Set, it silences the process completely — including the 400s the Spotify
+# backend returns when a Connect takeover is rejected — so a session that never
+# takes over is indistinguishable from an idle one. Worth a line: it is the
+# difference between "raspotify is fine" and "raspotify cannot tell you".
+if conf_on SPOTIFY && sudo -n grep -Eq '^[[:space:]]*LIBRESPOT_QUIET=' \
+     /etc/raspotify/conf 2>/dev/null; then
+  warn "LIBRESPOT_QUIET is set — raspotify journals nothing, errors included"
+  dim "unmute: comment it out in /etc/raspotify/conf, then restart raspotify"
+fi
 shown=0
 for svc in bluerelief-web bluerelief-kiosk bluerelief-screen raspotify; do
   key=$(switch_for "$svc")
@@ -287,7 +308,7 @@ for svc in bluerelief-web bluerelief-kiosk bluerelief-screen raspotify; do
   fi
   if [ "$(systemctl is-active "$svc" 2>/dev/null)" != "active" ]; then
     printf '\n  ── journalctl -u %s -n 15 ──\n' "$svc"
-    journalctl -u "$svc" -n 15 --no-pager 2>/dev/null | sed 's/^/    /'
+    jctl -u "$svc" -n 15 --no-pager -q 2>/dev/null | sed 's/^/    /'
     shown=1
   fi
 done
