@@ -73,6 +73,43 @@ state the board was in when it hung twice in silence.
 `bluerelief-status` reports the first four under **hang guards**; if the board
 hangs again, that is the first thing to read.
 
+## Patched librespot
+
+`/usr/bin/librespot` on the board is a local build, not the one apt installed,
+so `raspotify` is held and a reflash comes back without the fix. The patch is
+`patches/librespot-track-uid.patch` and carries its own unit tests.
+
+Spotify's mobile client selects a track with
+`skip_to: {"track_uid": "<uid>", "track_uri": ""}`. Upstream's
+`TryFrom<SkipTo> for PlayingTrack` tests `track_uri` first; the key is present
+but empty, so it resolves `Uri("")`, matches nothing, and falls back to index 0
+— or to a random track when shuffle is on. Every tap on a song in a playlist
+played the wrong one, while the device stayed green in every diagnostic. The
+patch treats an empty string as absent, which lets the `Uid` branch that already
+worked actually get reached.
+
+Rebuild on the board, against the commit raspotify ships:
+
+```sh
+git clone https://github.com/librespot-org/librespot.git ~/librespot-build
+cd ~/librespot-build && git checkout 9c7d75615fc093bdcbdb29adbce3fed38c531852
+git apply /path/to/patches/librespot-track-uid.patch
+cargo build --jobs 4 --profile release --no-default-features \
+  --features "alsa-backend pulseaudio-backend with-avahi rustls-tls-native-roots"
+sudo install -m 755 -o root -g root target/release/librespot /usr/bin/librespot
+sudo apt-mark hold raspotify && sudo systemctl restart raspotify
+```
+
+Those features are raspotify's, not librespot's defaults — the defaults swap in
+rodio and native-tls and drop avahi. About 31 minutes on this board. The stock
+binary is kept at `/var/lib/BlueRelief/librespot.stock`; restoring it and
+`apt-mark unhold raspotify` reverts everything.
+
+Unfixed upstream as of `dev` @ `a1b66d3`, so a newer librespot is not
+automatically a fix — re-read `connect/src/model.rs` before dropping the patch.
+The symptom that it is gone: `Failed to resolve index by Some(Uri(""))` in the
+journal on every tap.
+
 ## Preview on the Mac
 
 ```sh

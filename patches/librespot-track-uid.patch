@@ -1,0 +1,74 @@
+diff --git a/connect/src/model.rs b/connect/src/model.rs
+index 10f25f1..8732e79 100644
+--- a/connect/src/model.rs
++++ b/connect/src/model.rs
+@@ -135,9 +135,12 @@ impl TryFrom<SkipTo> for PlayingTrack {
+     fn try_from(value: SkipTo) -> Result<Self, Self::Error> {
+         // order of checks is important, as the index can be 0, but still has an uid or uri provided,
+         // so we only use the index as last resort
+-        if let Some(uri) = value.track_uri {
++        //
++        // an empty string counts as absent: mobile selects a track by `track_uid` and sends
++        // `track_uri` along as "", which would otherwise match here and resolve to nothing
++        if let Some(uri) = value.track_uri.filter(|uri| !uri.is_empty()) {
+             Ok(PlayingTrack::Uri(uri))
+-        } else if let Some(uid) = value.track_uid {
++        } else if let Some(uid) = value.track_uid.filter(|uid| !uid.is_empty()) {
+             Ok(PlayingTrack::Uid(uid))
+         } else if let Some(index) = value.track_index {
+             Ok(PlayingTrack::Index(index))
+@@ -165,3 +168,54 @@ pub(super) enum SpircPlayStatus {
+         preloading_of_next_track_triggered: bool,
+     },
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn skip_to(uid: Option<&str>, uri: Option<&str>, index: Option<u32>) -> SkipTo {
++        SkipTo {
++            track_uid: uid.map(str::to_string),
++            track_uri: uri.map(str::to_string),
++            track_index: index,
++        }
++    }
++
++    #[test]
++    fn uid_is_used_when_uri_is_empty() {
++        // what mobile actually sends when a track is tapped in a context
++        let track = PlayingTrack::try_from(skip_to(Some("7cf9e2594c7895245cf8"), Some(""), None));
++        assert!(
++            matches!(track, Ok(PlayingTrack::Uid(ref uid)) if uid == "7cf9e2594c7895245cf8"),
++            "expected the uid to be used, got {track:?}"
++        );
++    }
++
++    #[test]
++    fn uri_still_wins_when_present() {
++        let track = PlayingTrack::try_from(skip_to(
++            Some("7cf9e2594c7895245cf8"),
++            Some("spotify:track:3altlFsOlTnZYDuBsorZAy"),
++            None,
++        ));
++        assert!(
++            matches!(track, Ok(PlayingTrack::Uri(ref uri)) if uri == "spotify:track:3altlFsOlTnZYDuBsorZAy"),
++            "expected the uri to be used, got {track:?}"
++        );
++    }
++
++    #[test]
++    fn index_zero_survives_empty_uri_and_uid() {
++        let track = PlayingTrack::try_from(skip_to(Some(""), Some(""), Some(0)));
++        assert!(
++            matches!(track, Ok(PlayingTrack::Index(0))),
++            "expected index 0, got {track:?}"
++        );
++    }
++
++    #[test]
++    fn nothing_to_skip_to_is_an_error() {
++        assert!(PlayingTrack::try_from(skip_to(Some(""), Some(""), None)).is_err());
++        assert!(PlayingTrack::try_from(skip_to(None, None, None)).is_err());
++    }
++}
