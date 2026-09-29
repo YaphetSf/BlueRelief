@@ -1,0 +1,90 @@
+#!/bin/sh
+# bluerelief-bootcause — says why the board last came up, as one line.
+#
+# The board keeps dying without a log line, and the journal alone cannot tell
+# a hang from a power cut from a thermal trip: all three end the previous boot
+# mid-sentence. Three things can:
+#
+#   previous boot's journal  a clean shutdown reaches reboot/poweroff.target
+#   RK3399 CRU GLB_RST_ST    0xff760514. Bits 0-1 global soft reset, 2-3 TSADC
+#                            thermal, 4-5 watchdog; 0 means the SoC came up
+#                            from a power-on reset
+#   RK809 ON/OFF_SOURCE      logged by the BSP kernel every boot as
+#                            `rk808 0-0020: source: on=0x.., off=0x..`.
+#                            on bit 6 ON_PLUG_IN = input power returned after a
+#                            full loss; bit 4 RESTART_RESETB = RESETB pulled low
+#                            (RK809 datasheet Rev 2.7, p.121)
+#
+# GLB_RST_ST only describes the reset that started the current boot, so
+# bluerelief-bootcause.service runs this once per boot and the journal
+# (-t bluerelief-bootcause) keeps the history; bluerelief-status prints it.
+# Needs root for /dev/mem and the system journal.
+#
+# Output: <kind> after <uptime> up, last entry <time> — <raw evidence>
+#   kind: reboot poweroff halt kexec   the previous boot shut down cleanly
+#         watchdog thermal soft-reset  from GLB_RST_ST
+#         power-loss pmic-reset        from ON_SOURCE, on a power-on reset
+#         unclean                      no shutdown, and nothing above explains it
+#         unknown                      no journal from the previous boot
+
+set -u
+
+# has VALUE MASK — true when any MASK bit is set in the hex VALUE.
+has() {
+  [ -n "$1" ] && [ $(( $1 & $2 )) -ne 0 ]
+}
+
+dur() {
+  s=$1
+  if   [ "$s" -ge 86400 ]; then echo "$((s / 86400))d$((s % 86400 / 3600))h"
+  elif [ "$s" -ge 3600 ];  then echo "$((s / 3600))h$((s % 3600 / 60))m"
+  elif [ "$s" -ge 60 ];    then echo "$((s / 60))m"
+  else                          echo "${s}s"
+  fi
+}
+
+prev_line=$(journalctl -b -1 -n 1 -q -o short-unix --no-pager 2>/dev/null)
+prev_at=${prev_line%%.*}
+prev_up=$(journalctl -b -1 -n 1 -q -o short-monotonic --no-pager 2>/dev/null \
+  | sed -n 's/^\[ *\([0-9]*\)\..*/\1/p')
+prev_end=$(journalctl -b -1 _PID=1 -n 50 -q -o cat --no-pager 2>/dev/null \
+  | sed -nE 's/^Reached target (reboot|poweroff|halt|kexec)\.target.*/\1/p' \
+  | tail -1)
+
+cru=$(python3 -c '
+import mmap, os, struct
+m = mmap.mmap(os.open("/dev/mem", os.O_RDONLY | os.O_SYNC), 4096,
+              mmap.MAP_SHARED, mmap.PROT_READ, offset=0xff760000)
+print("0x%08x" % struct.unpack_from("<I", m, 0x514)[0])
+' 2>/dev/null)
+
+pmic=$(journalctl -k -b 0 -q -o cat --no-pager 2>/dev/null \
+  | sed -n 's/.*source: on=\(0x[0-9a-f]*\), off=\(0x[0-9a-f]*\).*/\1 \2/p' \
+  | head -1)
+pmic_on=${pmic%% *}
+pmic_off=${pmic##* }
+
+if [ -z "$prev_line" ]; then
+  kind=unknown
+elif [ -n "$prev_end" ]; then
+  kind=$prev_end
+elif has "$cru" 0x30; then
+  kind=watchdog
+elif has "$cru" 0x0c; then
+  kind=thermal
+elif has "$cru" 0x03; then
+  kind=soft-reset
+elif has "$pmic_on" 0x40; then
+  kind=power-loss
+elif has "$pmic_on" 0x10; then
+  kind=pmic-reset
+else
+  kind=unclean
+fi
+
+if [ -n "$prev_at" ]; then
+  when="after $(dur "${prev_up:-0}") up, last entry $(date -u -d "@$prev_at" '+%F %T') UTC"
+else
+  when="with no journal from the previous boot"
+fi
+echo "$kind $when — PMIC on=${pmic_on:-?} off=${pmic_off:-?}, CRU GLB_RST_ST=${cru:-?}"

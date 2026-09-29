@@ -223,10 +223,29 @@ else
   echo
 fi
 
+# ── Resets ────────────────────────────────────────────────────────────
+# A board that died and came back looks exactly like one that was never down,
+# and its journal just stops mid-sentence. bluerelief-bootcause.service records
+# the reason once per boot, from registers that are gone after the next reset.
+bold "resets"
+this=$(jctl -t bluerelief-bootcause -b 0 -n 1 -o cat --no-pager -q 2>/dev/null)
+case "$this" in
+  "") warn "no record for this boot — did bluerelief-bootcause.service run?"
+      dim "live: sudo bluerelief-bootcause" ;;
+  reboot\ *|poweroff\ *|halt\ *|kexec\ *) ok "${this%% — *}" ;;
+  *)  fail "${this%% — *}" ;;
+esac
+[ -n "$this" ] && dim "${this#* — }"
+# Earlier boots, newest first, without their register dumps.
+jctl -t bluerelief-bootcause -o cat --no-pager -q 2>/dev/null \
+  | head -n "-$([ -n "$this" ] && echo 1 || echo 0)" \
+  | tail -5 | tac | sed 's/ — .*//; s/^/    /'
+echo
+
 # ── Host-level hang guards ────────────────────────────────────────────
-# Two silent SoC hangs (2026-08-30, 2026-09-01) produced no kernel output, and
-# nothing rebooted the board, so it stayed dead for 9 and 33 hours. These four
-# are what changed afterwards; a reflashed board comes back without them.
+# Added after two silent hangs (2026-08-30, 2026-09-01) that nothing rebooted.
+# The board went on resetting with all four green; the resets block above
+# says how. A reflashed board comes back without them.
 bold "hang guards"
 dmc_min=$(cat /sys/class/devfreq/dmc/min_freq 2>/dev/null || true)
 dmc_max=$(cat /sys/class/devfreq/dmc/max_freq 2>/dev/null || true)
@@ -236,7 +255,7 @@ elif [ "$dmc_min" = "$dmc_max" ]; then
   ok "DDR pinned at $((dmc_min / 1000000)) MHz"
 else
   fail "DDR scaling live, $((dmc_min / 1000000))–$((dmc_max / 1000000)) MHz"
-  dim "prime suspect for a hang with no logs — rk3399-clocks.conf did not apply"
+  dim "rk3399-clocks.conf did not apply"
 fi
 
 wdog=$(systemctl show -p RuntimeWatchdogUSec --value 2>/dev/null || true)

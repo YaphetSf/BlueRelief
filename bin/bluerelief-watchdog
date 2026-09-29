@@ -1,5 +1,5 @@
 #!/bin/sh
-# bluerelief-watchdog — detects two distinct "looks alive but isn't playing"
+# bluerelief-watchdog — detects three distinct "looks alive but isn't playing"
 # failure modes in librespot and restarts raspotify.
 #
 # Failure mode A — local event loop wedged.
@@ -22,9 +22,22 @@
 #   ("channel closed" / "Websocket peer does not respond") in the last 3
 #   minutes; ≥3 hits = sustained, not a transient blip.
 #
+# Failure mode C — session closed and never reopened.
+#   Spotify closes the AP connection and librespot never reconnects: it logs
+#   "Connection to server closed." and then nothing, ever. A healthy one
+#   answers within a second ("Spirc shut down unexpectedly", a new AP). ZeroConf
+#   still answers 200 and there is no dealer left to complain, so A and B both
+#   pass. User-facing symptom: the board vanishes from Spotify, and tapping it
+#   on the phone does nothing. Seen 2026-09-27 05:54 until a reset 2.5 days later.
+#   Probe: the running librespot's last journal line is that close, ≥3 minutes
+#   old. It reads librespot's own log rather than asking the Web API whether
+#   the device is listed, because that token sees one account and the wedged
+#   session belonged to another.
+#
 # Behavior:
-#   - Mode B is in-band: 3 errors in 3 minutes IS the confirmation, restart
-#     immediately on the first watchdog tick that observes it.
+#   - Modes B and C are in-band: 3 errors in 3 minutes, or 3 minutes of
+#     silence after a close, IS the confirmation — restart on the first
+#     watchdog tick that observes it.
 #   - Mode A uses a two-miss confirmation (legacy behavior) — single missed
 #     ZeroConf probes are sometimes transient (DNS hiccup, etc.).
 #   - 5-minute cooldown after any restart so the new librespot has time to
@@ -72,6 +85,25 @@ if [ "${dealer_errs:-0}" -ge 3 ]; then
     LOG "WEDGE-B confirmed: ${dealer_errs} dealer/websocket errors in last 3m"
     restart_raspotify "dealer wedge"
     exit 0
+fi
+
+# ── Probe C: session closed, librespot silent since ─────────────────────
+# Scoped to the running process: a close logged by a librespot that has
+# since exited and been restarted is history, not a wedge.
+pid=$(systemctl show -p MainPID --value raspotify 2>/dev/null)
+if [ "${pid:-0}" -gt 0 ]; then
+    last=$(journalctl _SYSTEMD_UNIT=raspotify.service _PID="$pid" -n 1 \
+             -o short-unix --no-pager -q 2>/dev/null)
+    case "$last" in
+        *"Connection to server closed"*)
+            silent=$(( $(date +%s) - ${last%%.*} ))
+            if [ "$silent" -ge 180 ]; then
+                LOG "WEDGE-C confirmed: session closed ${silent}s ago, librespot silent since"
+                restart_raspotify "session wedge"
+                exit 0
+            fi
+            ;;
+    esac
 fi
 
 # ── Probe A: local event loop via ZeroConf ──────────────────────────────

@@ -251,8 +251,12 @@ if [ "$reload_systemd" = 1 ]; then
     bluerelief-screen.service \
     bluerelief-airplay-bridge.service \
     bluerelief-watchdog.timer \
+    bluerelief-bootcause.service \
     wifi-regdomain.service
 fi
+# A oneshot that stays active, so this records the current boot on the first
+# deploy and is a no-op on every later one.
+sudo systemctl start bluerelief-bootcause.service
 
 echo "Retiring pre-rename services..."
 for unit in \
@@ -274,8 +278,9 @@ sudo systemctl daemon-reload
 echo "Syncing host tunables..."
 # Not BlueRelief features: RK3399 and Broadcom-WiFi fixes a reflashed board
 # comes back without. Two silent SoC hangs (2026-08-30, 2026-09-01) left no
-# kernel output and nothing to reboot the board; the DDR pin removes the prime
-# suspect and the watchdog stops the next one lasting until someone notices.
+# kernel output and nothing to reboot the board. The DDR pin and the watchdog
+# came from those. Most resets since then came from the PMIC (power loss,
+# RESETB), not from a hang; bluerelief-bootcause records which.
 if sync_file etc/tmpfiles.d/rk3399-clocks.conf \
     /etc/tmpfiles.d/rk3399-clocks.conf 0644; then
   sudo systemd-tmpfiles --create /etc/tmpfiles.d/rk3399-clocks.conf

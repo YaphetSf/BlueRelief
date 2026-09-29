@@ -1,0 +1,11 @@
+[Unit]
+Description=Record why the board last reset (bluerelief-bootcause)
+After=systemd-journal-flush.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/bluerelief-bootcause
+
+[Install]
+WantedBy=multi-user.target
