@@ -29,13 +29,16 @@
 #   still answers 200 and there is no dealer left to complain, so A and B both
 #   pass. User-facing symptom: the board vanishes from Spotify, and tapping it
 #   on the phone does nothing. Seen 2026-09-27 05:54 until a reset 2.5 days later.
-#   Probe: the running librespot's last journal line is that close, ≥3 minutes
-#   old. It reads librespot's own log rather than asking the Web API whether
+#   Probe: the running librespot's last journal line is that close, ≥10 minutes
+#   old. Not less: on 2026-09-29 a close was followed by 201 s of silence
+#   before librespot noticed via the dealer and reconnected on its own, keeping
+#   its credentials — a restart would have lost them, since the credential cache
+#   is off. It reads librespot's own log rather than asking the Web API whether
 #   the device is listed, because that token sees one account and the wedged
 #   session belonged to another.
 #
 # Behavior:
-#   - Modes B and C are in-band: 3 errors in 3 minutes, or 3 minutes of
+#   - Modes B and C are in-band: 3 errors in 3 minutes, or 10 minutes of
 #     silence after a close, IS the confirmation — restart on the first
 #     watchdog tick that observes it.
 #   - Mode A uses a two-miss confirmation (legacy behavior) — single missed
@@ -97,7 +100,7 @@ if [ "${pid:-0}" -gt 0 ]; then
     case "$last" in
         *"Connection to server closed"*)
             silent=$(( $(date +%s) - ${last%%.*} ))
-            if [ "$silent" -ge 180 ]; then
+            if [ "$silent" -ge 600 ]; then
                 LOG "WEDGE-C confirmed: session closed ${silent}s ago, librespot silent since"
                 restart_raspotify "session wedge"
                 exit 0
