@@ -17,3 +17,4 @@ __pycache__/
 # Agent/editor local config — kept on disk, not tracked
 /.claude/
 /CLAUDE.md
+/AGENTS.md
