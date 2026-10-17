@@ -22,24 +22,26 @@
 #   ("channel closed" / "Websocket peer does not respond") in the last 3
 #   minutes; ≥3 hits = sustained, not a transient blip.
 #
-# Failure mode C — session closed and never reopened.
-#   Spotify closes the AP connection and librespot never reconnects: it logs
-#   "Connection to server closed." and then nothing, ever. A healthy one
-#   answers within a second ("Spirc shut down unexpectedly", a new AP). ZeroConf
-#   still answers 200 and there is no dealer left to complain, so A and B both
-#   pass. User-facing symptom: the board vanishes from Spotify, and tapping it
-#   on the phone does nothing. Seen 2026-09-27 05:54 until a reset 2.5 days later.
-#   Probe: the running librespot's last journal line is that close, ≥10 minutes
-#   old. Not less: on 2026-09-29 a close was followed by 201 s of silence
-#   before librespot noticed via the dealer and reconnected on its own, keeping
-#   its credentials — a restart would have lost them, since the credential cache
-#   is off. It reads librespot's own log rather than asking the Web API whether
-#   the device is listed, because that token sees one account and the wedged
-#   session belonged to another.
+# Failure mode C — logged in, but no connection to Spotify left.
+#   librespot loses its AP session and never opens a new one. ZeroConf keeps
+#   answering 200 and naming the account as activeUser, and there is no dealer
+#   left to complain, so A and B both pass. The log cannot be trusted to say
+#   so: on 2026-09-27 the last line was "Connection to server closed.", on
+#   2026-10-16 (router reboot) a single "Websocket peer does not respond.",
+#   because the AP keep-alive timeout shuts the session down without logging.
+#   User-facing symptom: the board vanishes from Spotify, and tapping it on the
+#   phone does nothing. Lasted 2.5 days the first time, 32 h the second.
+#   Probe: getInfo names an activeUser, yet librespot has held no TCP
+#   connection other than ZeroConf clients for ≥10 minutes. Not less: on
+#   2026-09-29 a dropped session came back on its own after 201 s, keeping its
+#   credentials — a restart would have lost them, since the credential cache
+#   is off. It reads librespot's own state rather than asking the Web API
+#   whether the device is listed, because that token sees one account and the
+#   wedged session belonged to another.
 #
 # Behavior:
-#   - Modes B and C are in-band: 3 errors in 3 minutes, or 10 minutes of
-#     silence after a close, IS the confirmation — restart on the first
+#   - Modes B and C are in-band: 3 errors in 3 minutes, or 10 minutes logged
+#     in with no connection, IS the confirmation — restart on the first
 #     watchdog tick that observes it.
 #   - Mode A uses a two-miss confirmation (legacy behavior) — single missed
 #     ZeroConf probes are sometimes transient (DNS hiccup, etc.).
@@ -57,7 +59,7 @@ LOG() {
 
 restart_raspotify() {
     reason=$1
-    rm -f "$MISS"
+    rm -f "$MISS" "$OFFLINE"
     if systemctl restart raspotify; then
         touch "$RESTARTED"
         LOG "raspotify restart issued ($reason)"
@@ -67,6 +69,7 @@ restart_raspotify() {
 }
 
 MISS=/run/bluerelief-watchdog.miss
+OFFLINE=/run/bluerelief-watchdog.offline
 RESTARTED=/run/bluerelief-watchdog.last-restart
 
 # Cooldown: skip checks while raspotify is still coming up after our restart.
@@ -90,33 +93,42 @@ if [ "${dealer_errs:-0}" -ge 3 ]; then
     exit 0
 fi
 
-# ── Probe C: session closed, librespot silent since ─────────────────────
-# Scoped to the running process: a close logged by a librespot that has
-# since exited and been restarted is history, not a wedge.
-pid=$(systemctl show -p MainPID --value raspotify 2>/dev/null)
-if [ "${pid:-0}" -gt 0 ]; then
-    last=$(journalctl _SYSTEMD_UNIT=raspotify.service _PID="$pid" -n 1 \
-             -o short-unix --no-pager -q 2>/dev/null)
-    case "$last" in
-        *"Connection to server closed"*)
-            silent=$(( $(date +%s) - ${last%%.*} ))
-            if [ "$silent" -ge 600 ]; then
-                LOG "WEDGE-C confirmed: session closed ${silent}s ago, librespot silent since"
-                restart_raspotify "session wedge"
-                exit 0
-            fi
-            ;;
-    esac
-fi
-
-# ── Probe A: local event loop via ZeroConf ──────────────────────────────
 # Discover librespot's ZeroConf listening port (chosen randomly per startup).
 port=$(ss -tlnp 2>/dev/null | awk '/users:\(\("librespot"/ {
     n = split($4, a, ":"); print a[n]; exit
 }')
 
-if [ -n "$port" ] && curl --max-time 4 -fsS -o /dev/null \
-       "http://127.0.0.1:${port}/?action=getInfo"; then
+# librespot's established TCP connections, minus ZeroConf clients.
+links=$(ss -Htnp state established 2>/dev/null | awk -v zc=":${port}\$" '
+    /users:\(\("librespot"/ && $3 !~ zc { n++ } END { print n + 0 }')
+
+info=
+if [ -n "$port" ]; then
+    info=$(curl --max-time 4 -fsS "http://127.0.0.1:${port}/?action=getInfo") || info=
+fi
+user=$(printf '%s' "$info" | sed -n 's/.*"activeUser":"\([^"]*\)".*/\1/p')
+
+# ── Probe C: logged in, no connection to Spotify ────────────────────────
+# OFFLINE's mtime is the tick that first saw the board logged in but unlinked.
+if [ -n "$user" ] && [ "$links" -eq 0 ]; then
+    if [ ! -f "$OFFLINE" ]; then
+        touch "$OFFLINE"
+        LOG "logged in with no connection to Spotify; restart in 10m unless it reconnects"
+    else
+        gone=$(( $(date +%s) - $(stat -c %Y "$OFFLINE") ))
+        if [ "$gone" -ge 600 ]; then
+            LOG "WEDGE-C confirmed: logged in, no connection to Spotify for ${gone}s"
+            restart_raspotify "session wedge"
+            exit 0
+        fi
+    fi
+elif [ -f "$OFFLINE" ]; then
+    [ "$links" -gt 0 ] && LOG "reconnected on its own after $(( $(date +%s) - $(stat -c %Y "$OFFLINE") ))s"
+    rm -f "$OFFLINE"
+fi
+
+# ── Probe A: local event loop via ZeroConf ──────────────────────────────
+if [ -n "$info" ]; then
     [ -f "$MISS" ] && LOG "recovered (port :${port})"
     rm -f "$MISS"
     exit 0
