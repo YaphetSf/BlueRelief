@@ -105,8 +105,9 @@ rodio and native-tls and drop avahi. About 31 minutes on this board. The stock
 binary is kept at `/var/lib/BlueRelief/librespot.stock`; restoring it and
 `apt-mark unhold raspotify` reverts everything.
 
-Unfixed upstream as of `dev` @ `a1b66d3`, so a newer librespot is not
-automatically a fix — re-read `connect/src/model.rs` before dropping the patch.
+Upstream fixed it on `dev` in 53faaca (#1795, 2026-10-16), but no release has it
+yet (newest is v0.8.0, checked 2026-10-30): keep the patch and the raspotify hold
+until raspotify ships a librespot that contains 53faaca.
 The symptom that it is gone: `Failed to resolve index by Some(Uri(""))` in the
 journal on every tap.
 
